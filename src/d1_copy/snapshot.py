@@ -522,6 +522,20 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
                 ).fetchone()
                 out.write(f"{definition};\n")
             plan = _insert_plan(connection, tables)
+            # A foreign key whose parent key is unique only through a separate
+            # index needs that index before its first child row is written, so
+            # such a table's indexes come before every row - all of them, in
+            # the source's order, which keeps their order among themselves.
+            early = [
+                definition
+                for (definition, table) in connection.execute(
+                    "SELECT sql, tbl_name FROM sqlite_schema WHERE type = 'index' "
+                    "AND sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY rowid"
+                )
+                if table in plan.indexed_first
+            ]
+            for definition in early:
+                out.write(f"{definition};\n")
             locked = {LOCK_TABLE: {"locked": "1"}}
             for table in plan.tables:
                 _write_rows(
@@ -547,7 +561,8 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
                 "AND name NOT GLOB 'sqlite_*' ORDER BY rowid"
             ).fetchall()
             for (definition,) in others:
-                out.write(f"{definition};\n")
+                if definition not in early:
+                    out.write(f"{definition};\n")
             if _has_table(connection, "sqlite_stat1"):
                 # sqlite_stat1 is a reserved name that cannot be created, so an
                 # ANALYZE brings it into being; a D1 export opens the same way.
@@ -618,6 +633,9 @@ class _InsertPlan:
     tables: list[str]
     # table -> the columns written as NULL at insert and restored afterwards.
     deferred: dict[str, list[str]]
+    # Tables some foreign key points at through a key that only a separate
+    # CREATE UNIQUE INDEX makes unique (_unique_only_by_an_index).
+    indexed_first: set[str]
 
 
 def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPlan:
@@ -702,6 +720,12 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
     }
 
     deferred: dict[str, list[str]] = {}
+    indexed_first = {
+        key.parent
+        for keys_of in foreign.values()
+        for key in keys_of
+        if _unique_only_by_an_index(connection, key.parent, key.parent_columns)
+    }
     ordered: list[str] = []
     waiting = set(tables)
     while waiting:
@@ -742,7 +766,7 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
         ordered.append(freed)
         waiting.discard(freed)
 
-    return _InsertPlan(ordered, deferred)
+    return _InsertPlan(ordered, deferred, indexed_first)
 
 
 # SQLite folds case in names for ASCII letters only: `K` and the Kelvin sign
@@ -752,6 +776,38 @@ _ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrst
 
 def _folded(name: str) -> str:
     return name.translate(_ASCII_LOWER)
+
+
+def _unique_only_by_an_index(
+    connection: sqlite3.Connection, table: str, key: tuple[str, ...]
+) -> bool:
+    """Whether `key` of `table` is unique through a CREATE UNIQUE INDEX alone.
+
+    SQLite requires a foreign key's parent key to be unique when a child row is
+    written: its primary key, a UNIQUE constraint, or a unique index on exactly
+    those columns. The first two are part of the table and exist with it; a
+    separate index exists only once it is created. A partial index cannot serve
+    as a parent key, and is not counted.
+    """
+    wanted = {_folded(column) for column in key}
+    if {_folded(column) for column in _primary_key(connection, table)} == wanted:
+        return False
+    standalone = False
+    for _, name, unique, origin, partial in connection.execute(
+        f"PRAGMA index_list({_quoted(table)})"
+    ).fetchall():
+        if not unique or partial:
+            continue
+        indexed = {
+            _folded(str(row[2]))
+            for row in connection.execute(f"PRAGMA index_info({_quoted(str(name))})")
+        }
+        if indexed != wanted:
+            continue
+        if origin != "c":
+            return False
+        standalone = True
+    return standalone
 
 
 def _table_columns(
