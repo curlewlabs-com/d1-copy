@@ -37,10 +37,9 @@ WHAT IT REFUSES, each before anything is written:
   - a target that already holds application tables. A copy is only ever made
     into an empty database, and nothing here drops or deletes what a database
     already held;
-  - a source holding a value an export would change: an integer beyond 2^53,
-    a REAL, or text holding both a newline and a literal backslash-n (or a
-    carriage return and a literal backslash-r). The copy would change it and
-    the comparison, made between exports, could not tell (snapshot.py's
+  - a source holding a value an export would change, or one it cannot be
+    shown to carry: an integer beyond 2^53, or a REAL. The copy would change
+    it and the comparison, made between exports, could not tell (snapshot.py's
     UNEXPORTABLE);
   - foreign keys that form a cycle with no nullable column to break it at
     (snapshot.py).

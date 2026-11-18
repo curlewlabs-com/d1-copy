@@ -13,55 +13,61 @@ It is standard-library Python and talks to D1 through its REST API.
 ## Why it exists
 
 D1 has an export and an import, but an export is not a file you can import
-safely, and comparing two exports does not show that a copy is exact. Three
-traps lie in the way:
+safely, and comparing two exports does not show that a copy is exact. Each trap
+below was measured against remote D1, through the REST export and through
+`wrangler d1 export --remote`, which wrote byte-identical files.
 
-1. **D1 cannot be trusted to import its own export.** An export writes each
-   table's rows straight after that table's `CREATE TABLE`, in catalog order. A
-   child table defined before its parent then has its rows inserted before the
-   parent table exists. D1 enforces foreign keys, so the import stops with
-   `no such table`. `PRAGMA defer_foreign_keys` does not rescue it. That pragma
-   defers the row check, not the lookup of the parent table, and SQLite turns it
-   off at every commit, which matters because D1 runs a large import as several
-   transactions. A handful of child rows ahead of their parent imported cleanly
-   under the pragma; a few thousand failed. Cloudflare's import documentation
-   leaves the order to you: "ensure you are importing the tables in the right
-   order. You cannot refer to a table that does not yet exist"
+1. **D1 cannot import its own export.** An export writes each table's rows
+   straight after that table's `CREATE TABLE`, in catalog order. A child table
+   defined before its parent then has its rows inserted before the parent table
+   exists, and the import stops with `no such table: main.parent`. This happened
+   with a single child row, and nothing was applied. The export opens with
+   `PRAGMA defer_foreign_keys=TRUE`, which does not help: that pragma defers
+   the row check, not the lookup of the parent table. It also stops short of
+   rows written ahead of a parent table that does exist. SQLite turns it off at
+   every commit, and D1 runs a large import as several transactions: while this
+   tool was being built, a handful of such child rows imported cleanly and a
+   few thousand failed. Cloudflare's import documentation leaves the order to
+   you: "ensure you are importing the tables in the right order. You cannot
+   refer to a table that does not yet exist"
    ([import and export data](https://developers.cloudflare.com/d1/best-practices/import-export-data/)).
-   The API reference now describes the default export format as one that "D1
-   can import"
-   ([export](https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/export/)),
-   so check this against your own databases. This tool was built against
-   exports that failed in exactly this way.
 
 2. **An export changes any integer beyond 2^53, silently.** D1 stores a 64-bit
-   integer exactly, but the export passes it through a double: 2^53 + 1 leaves
-   as 2^53, and the largest int64 leaves rounded, each still written as an
-   integer. The source's export and the copy's export then carry the same wrong
-   number and agree, so no comparison of exports can catch it. Cloudflare's
-   documentation says large int64 values "may be less precise". The rounding
-   was reported against remote D1 and the REST export in
+   integer exactly, but the export passes it through a double. 2^53 + 1 leaves
+   as 2^53, still written as an integer, so the source's export and the copy's
+   carry the same wrong number and agree, and no comparison of exports can
+   catch it. The largest and smallest int64 leave as `9223372036854776000` and
+   `-9223372036854776000`, which no 64-bit integer can hold. A STRICT `INTEGER`
+   column refuses that on import, and any other column reads it back as a REAL.
+   Cloudflare's documentation says large int64 values "may be less precise".
+   The rounding is also reported in
    [cloudflare/workers-sdk#15378](https://github.com/cloudflare/workers-sdk/issues/15378).
-   That issue was closed by a change that fixed only how `Infinity` is written
-   in the local (Miniflare) export, and the change's own description leaves the
-   int64 precision loss as "a separate, larger fix".
 
-3. **An export can rewrite other values too.** Cloudflare's own export source,
-   [`dumpSql.ts`](https://github.com/cloudflare/workers-sdk/blob/e35c4a154ea16a96b47cb2e68a4930c1d833e81d/packages/miniflare/src/workers/d1/dumpSql.ts) in Miniflare, its local implementation of the format,
-   writes a number as JavaScript prints it
-   ([lines 124-128](https://github.com/cloudflare/workers-sdk/blob/e35c4a154ea16a96b47cb2e68a4930c1d833e81d/packages/miniflare/src/workers/d1/dumpSql.ts#L124-L128)), so the REAL `1.0` is written as `1` and
-   reads back into a column of no declared type as the INTEGER `1`. It writes a
-   newline inside text as the two characters `\n` and wraps the literal in
-   `replace(..., '\n', char(10))`
-   ([lines 205-236](https://github.com/cloudflare/workers-sdk/blob/e35c4a154ea16a96b47cb2e68a4930c1d833e81d/packages/miniflare/src/workers/d1/dumpSql.ts#L205-L236)), so a literal backslash-n in the same
-   value comes back as a second newline; a carriage return and `\r` go the same
-   way. In both cases the source's export and the copy's agree on the changed
-   value. This was read in that source, not measured against remote D1, and the
-   tool refuses such values rather than assume remote D1 behaves differently.
+3. **An export writes a whole-number REAL as an integer.** It writes a number
+   as JavaScript prints it, so the REAL `1.0` is written as `1`. An `ANY`
+   column or one with no declared type reads that back as the INTEGER `1`. A
+   `REAL` column turns it back into `1.0`. Every other REAL measured
+   (`0.1`, `0.30000000000000004`, `1e21`, `1e300`, the smallest subnormal and
+   the largest double) read back as the same double. That rests on SQLite
+   reading the decimal text back exactly, which this tool does not check.
 
-None of these was re-measured against live D1 for this release. The rest of the
-tool's behaviour follows from what was observed while building it, set out
-under [How it works](#how-it-works).
+4. **A raw NUL ends an import silently.** Text may hold a NUL byte, and the
+   export writes it raw inside the string literal. D1's import of a file that
+   holds it reports success and stops there. In the measurement, the statement
+   holding the byte and everything after it were dropped: no error, and a
+   table defined later in the file was never created.
+
+Text with line breaks is carried exactly. Remote D1 writes a line break inside
+text as an escape the value does not already hold: `\n`, or `\012` when the
+value holds a literal `\n`, or `(\n0)`, `(\n1)` and on, and the same for a
+carriage return. It wraps the literal in a `replace()` that turns back only
+that escape. Values built to confuse it, a literal `\n` beside a newline among
+them, came back byte for byte. The local export in Miniflare, which
+`wrangler d1 export --local` uses, does not do this. It
+[always writes `\n`](https://github.com/cloudflare/workers-sdk/blob/e35c4a154ea16a96b47cb2e68a4930c1d833e81d/packages/miniflare/src/workers/d1/dumpSql.ts#L205-L236),
+so a literal backslash-n in a value that also holds a newline comes back as a
+second newline. A local export passed to `restore` may already hold that
+change, and nothing in the file can show it.
 
 D1's other tools do not cover this. [Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
 restores a database in place and "does not yet allow you to clone or fork an
@@ -148,8 +154,9 @@ KEY` is never held back, although SQLite reports it as nullable: a NULL
   writes to the table until that reload.
 - **Text holding a control character is written as `CAST(X'...' AS TEXT)`.**
   SQLite's `quote()` stops at an embedded NUL, so `'ab<NUL>cd'` would become
-  `'ab'`. D1 keeps such a value and exports the raw byte, which Python will not
-  execute, so the loader swaps it for a token and puts it back afterwards.
+  `'ab'`, and a raw NUL in the file would end D1's import there. D1 keeps such
+  a value and exports the raw byte, which Python will not execute, so the
+  loader swaps it for a token and puts it back afterwards.
 
 The comparison covers every application table as a multiset of rows (never by
 rowid, which an import reassigns for a table keyed by a BLOB), `sqlite_sequence`,
@@ -160,12 +167,10 @@ What it refuses, each before the target is touched:
 
 - a source and a target that are the same database;
 - a target that already holds a table;
-- a source holding a value an export would change: an integer beyond 2^53, a
-  REAL value anywhere, or text holding both a newline and a literal `\n` (or a
-  carriage return and a literal `\r`). See [Why it exists](#why-it-exists);
-  a REAL is also refused because an export writes it as decimal text, which
-  need not read back as the same double. `copy` and `verify` ask the live
-  database, in three queries per database, before exporting it. `verify` asks
+- a source holding a value an export would change, or that this tool cannot
+  show it carries: an integer beyond 2^53, or a REAL value anywhere. See
+  [Why it exists](#why-it-exists). `copy` and `verify` ask the live database,
+  in three queries per database, before exporting it. `verify` asks
   both sides, because 2^53 + 1 and 2^53 export as the same number. `restore`
   asks the loaded dump. The live check reads each row of the database once,
   and the command prints what it read, since D1 meters rows read;
@@ -211,8 +216,11 @@ other.
 - It does not copy a database that is still changing into an exact copy. See
   "Before you run it".
 - It does not merge into, or overwrite, a database that holds anything.
-- It does not carry REAL values, integers beyond 2^53, or text holding both a
-  line break and its escaped form; it refuses them.
+- It does not carry integers beyond 2^53. The export rounds them, and the
+  live check refuses a source that holds one rather than copy it changed.
+- It does not carry REAL values. A whole-number REAL in an `ANY` or untyped
+  column comes back as an INTEGER, and for the rest nothing here checks that
+  the decimal text reads back as the same double. It refuses them.
 - It cannot copy a database that holds a virtual table: D1's export does not
   support them.
 

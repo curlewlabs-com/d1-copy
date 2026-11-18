@@ -213,11 +213,12 @@ def _rows(connection: sqlite3.Connection, table: str) -> collections.Counter[_Ro
 def _real_valued_columns(connection: sqlite3.Connection, table: str) -> list[str]:
     """Columns of `table` that hold at least one REAL value.
 
-    A dump writes a REAL as decimal text, which need not read back as the same
-    double. A source's dump and its copy's would still agree with each other, so the
-    comparison below could not see that loss; refusing the value is what keeps
-    "exact" true. SQLite does not stop one arriving in a column of another
-    declared type, so every column is asked.
+    A dump writes a REAL as decimal text, and nothing here checks that it reads
+    back as the same double (UNEXPORTABLE says what was measured). A source's
+    dump and its copy's would agree with each other, so the comparison below
+    could not see such a loss; refusing the value is what keeps "exact" true.
+    SQLite does not stop one arriving in a column of another declared type, so
+    every column is asked.
     """
     quoted = table.replace('"', '""')
     columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{quoted}")')]
@@ -337,24 +338,26 @@ EXPORT_SAFE_INTEGER = 2**53
 
 
 # Each kind of value an export does not carry exactly, by the letter its probe
-# column is named with in unexportable_sql.
+# column is named with in unexportable_sql. Both were measured against remote
+# D1's export.
 #
 #   i - D1 holds a 64-bit integer exactly and exports it through a double:
-#       2^53 + 1 leaves as 2^53, still written as an integer.
-#   r - an export writes a REAL as decimal text, which need not read back as the
-#       same double, and Cloudflare's export source writes a whole-number REAL
-#       without its decimal point, so 1.0 in a column of no declared type reads
-#       back as the INTEGER 1.
-#   n - Cloudflare's export source writes a real newline inside text as the two
-#       characters backslash and n, and wraps the literal in a replace() that
-#       turns every such pair back into a newline, so a literal backslash-n in
-#       the same value becomes a newline too; a carriage return and backslash-r
-#       go the same way.
+#       2^53 + 1 leaves as 2^53, still written as an integer, and the largest
+#       int64 leaves as 9223372036854776000, which no INTEGER can hold.
+#   r - an export writes a REAL as the decimal text JavaScript prints for it. A
+#       whole number loses its decimal point, so 1.0 reads back into an ANY or
+#       untyped column as the INTEGER 1. Other values read back as the same
+#       double in every case measured, but that rests on SQLite's decimal
+#       parsing, which nothing here checks, so every REAL is refused.
+#
+# Text is not among them. Remote D1 writes a line break inside text as an escape
+# the value does not already hold (observed: `\n`, else `\012`, else `(\n0)`,
+# `(\n1)`, ...), so the replace() it wraps the literal in turns back only that
+# escape. Miniflare's local export uses a fixed `\n` instead, so a local export
+# does change a literal backslash-n that sits beside a newline.
 UNEXPORTABLE = {
     "i": "an integer beyond 2^53",
     "r": "a REAL value",
-    "n": "text holding both a newline and a literal \\n, or both a carriage "
-    "return and a literal \\r",
 }
 
 
@@ -373,13 +376,9 @@ def unexportable_sql(table: str, columns: list[str]) -> str:
     for index, column in enumerate(columns):
         name = _quoted(column)
         beyond = f"{name} > {EXPORT_SAFE_INTEGER} OR {name} < -{EXPORT_SAFE_INTEGER}"
-        newline = f"instr({name}, char(10)) > 0 AND instr({name}, '\\n') > 0"
-        carriage = f"instr({name}, char(13)) > 0 AND instr({name}, '\\r') > 0"
-        rewritten = f"({newline}) OR ({carriage})"
         probes += [
             f"max(typeof({name}) = 'integer' AND ({beyond})) AS \"i{index}\"",
             f"max(typeof({name}) = 'real') AS \"r{index}\"",
-            f"max(typeof({name}) = 'text' AND ({rewritten})) AS \"n{index}\"",
         ]
     return f"SELECT {', '.join(probes)} FROM {_quoted(table)}"
 

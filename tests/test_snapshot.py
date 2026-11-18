@@ -463,7 +463,19 @@ class UnexportableValueTest(unittest.TestCase):
         limit = snapshot.EXPORT_SAFE_INTEGER
         self.assertEqual(
             self._found(
-                0, limit, -limit, None, b"\x00\n", "a\nb", "a\\nb", "a\r\nb", "a\\rb"
+                0,
+                limit,
+                -limit,
+                None,
+                b"\x00\n",
+                "a\nb",
+                "a\\nb",
+                "a\r\nb",
+                "a\\rb",
+                # Remote D1's export escapes a line break with something the
+                # value does not hold, so the literal beside it survives.
+                "a\\nb\nc",
+                "a\\rb\rc",
             ),
             [],
         )
@@ -485,28 +497,17 @@ class UnexportableValueTest(unittest.TestCase):
         the INTEGER 1, and both exports agree on the INTEGER."""
         self.assertEqual(self._found(1.0), ["t.v holds a REAL value"])
 
-    def test_text_with_a_newline_and_a_literal_backslash_n_is_found(self) -> None:
-        """The export turns the literal into a second newline, on both sides."""
-        self.assertEqual(
-            self._found("a\\nb\nc"),
-            [f"t.v holds {snapshot.UNEXPORTABLE['n']}"],
-        )
-
-    def test_text_with_a_carriage_return_and_a_literal_backslash_r_is_found(
-        self,
-    ) -> None:
-        self.assertTrue(self._found("a\\rb\rc"))
-
     def test_an_answer_missing_a_column_is_refused_rather_than_read_as_clean(
         self,
     ) -> None:
         with self.assertRaises(snapshot.SnapshotError):
-            snapshot.unexportable_values("t", ["id", "v"], {"i0": 0, "r0": 0})
+            snapshot.unexportable_values("t", ["id", "v"], {"i0": 0, "r0": 0, "i1": 0})
 
     def test_the_finding_names_the_column_and_never_the_value(self) -> None:
-        found = "".join(self._found("never-print-this\\n\n"))
+        value = snapshot.EXPORT_SAFE_INTEGER + 123457
+        found = "".join(self._found(value))
         self.assertIn("t.v", found)
-        self.assertNotIn("never-print-this", found)
+        self.assertNotIn(str(value), found)
 
 
 class UnexportableValueInADumpTest(_Databases):
@@ -533,17 +534,16 @@ class UnexportableValueInADumpTest(_Databases):
         )
 
     def test_planner_statistics_are_checked_like_any_copied_table(self) -> None:
-        """sqlite_stat1 is copied and compared, and its text is the names of
-        tables and indexes, so an export can rewrite it like any other."""
-        odd = '"x\\n\ny"'
+        """sqlite_stat1 is copied and compared, and its columns have no declared
+        type, so it can hold a value an export changes like any other table."""
         database = self.database(
-            f"CREATE TABLE {odd} (id INTEGER PRIMARY KEY, k INTEGER);\n"
-            f"CREATE INDEX idx_odd ON {odd}(k);\n"
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, k INTEGER);\n"
+            "CREATE INDEX idx_t ON t(k);\n"
             "ANALYZE sqlite_schema;\n"
-            "INSERT INTO sqlite_stat1 VALUES('x\\n' || char(10) || 'y', 'idx_odd', '1 1');\n"
+            f"INSERT INTO sqlite_stat1 VALUES('t', 'idx_t', {snapshot.EXPORT_SAFE_INTEGER + 1});\n"
         )
         found = snapshot.values_an_export_would_change(database)
-        self.assertIn(f"sqlite_stat1.tbl holds {snapshot.UNEXPORTABLE['n']}", found)
+        self.assertIn("sqlite_stat1.stat holds an integer beyond 2^53", found)
 
     def test_a_sequence_mark_beyond_it_is_found_too(self) -> None:
         """sqlite_sequence is copied like any table and read back the same way."""

@@ -3,9 +3,9 @@
 It replaces `urllib.request.urlopen`, so every line of the client and the
 command line runs as it does against Cloudflare. It reproduces what D1 does that
 this tool exists for: an export writes each table's rows right after its
-definition in catalog order, and writes each value as Cloudflare's export source
-does (_exported); an import runs with foreign keys enforced and applies nothing
-when it fails.
+definition in catalog order, and writes each value as remote D1's export was
+measured to (_exported); an import runs with foreign keys enforced, applies
+nothing when it fails, and stops silently at a raw NUL.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import contextlib
 import decimal
 import email.message
 import io
+import itertools
 import json
 import pathlib
 import sqlite3
@@ -185,10 +186,15 @@ class FakeD1:
             }
         assert body["action"] == "ingest", body
         before = database.read_bytes()
+        payload = self._uploads.pop(uuid)
+        if b"\x00" in payload:
+            # Measured: D1 runs a file up to its first raw NUL, drops the
+            # statement it falls in and everything after, and reports success.
+            payload = payload[: payload.rindex(b"\n", 0, payload.index(b"\x00")) + 1]
         connection = sqlite3.connect(database, autocommit=True)
         try:
             connection.execute("PRAGMA foreign_keys=ON")
-            connection.executescript(self._uploads.pop(uuid).decode())
+            connection.executescript(payload.decode())
         except sqlite3.Error as exc:
             connection.close()
             database.write_bytes(before)
@@ -212,9 +218,9 @@ def _inserts(connection: sqlite3.Connection, table: str) -> list[str]:
 
 
 def _exported(value: object) -> str:
-    """A value as Cloudflare's export source writes one (dumpSql.ts at
-    https://github.com/cloudflare/workers-sdk/blob/e35c4a154ea16a96b47cb2e68a4930c1d833e81d/packages/miniflare/src/workers/d1/dumpSql.ts):
-    a number as JavaScript prints it, and text with its line breaks escaped."""
+    """A value as remote D1's export writes one, as measured: a number as
+    JavaScript prints it, and a line break inside text as an escape the value
+    does not already hold, put back by replace()."""
     if value is None:
         return "NULL"
     if isinstance(value, (int, float)):
@@ -222,13 +228,29 @@ def _exported(value: object) -> str:
     if isinstance(value, bytes):
         return f"X'{value.hex()}'"
     text = str(value)
-    escaped = text.replace("'", "''").replace("\n", "\\n").replace("\r", "\\r")
+    breaks = [
+        (character, _escape_absent_from(text, letter, octal))
+        for character, letter, octal in (("\r", "r", "015"), ("\n", "n", "012"))
+        if character in text
+    ]
+    escaped = text.replace("'", "''")
+    for character, escape in breaks:
+        escaped = escaped.replace(character, escape)
     literal = f"'{escaped}'"
-    if "\r" in text:
-        literal = f"replace({literal},'\\r',char(13))"
-    if "\n" in text:
-        literal = f"replace({literal},'\\n',char(10))"
+    for character, escape in breaks:
+        literal = f"replace({literal},'{escape}',char({ord(character)}))"
     return literal
+
+
+def _escape_absent_from(text: str, letter: str, octal: str) -> str:
+    """The first of D1's escapes for a line break that `text` does not hold:
+    backslash-n, then backslash-012, then `(` backslash-n `0)`, `(` backslash-n
+    `1)` and on (`r` and `015` for a carriage return)."""
+    candidates = itertools.chain(
+        (f"\\{letter}", f"\\{octal}"),
+        (f"(\\{letter}{index})" for index in itertools.count()),
+    )
+    return next(candidate for candidate in candidates if candidate not in text)
 
 
 def _javascript_number(number: float) -> str:
