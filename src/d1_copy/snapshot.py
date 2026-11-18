@@ -494,14 +494,7 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
             for table, columns in plan.deferred.items():
                 _write_restores(connection, table, columns, out)
             if _has_table(connection, "sqlite_sequence"):
-                # This DELETE, and the one of sqlite_stat1 below, clear only what
-                # this file's own statements wrote. The file is for an empty
-                # database and cannot run against another of this schema: its
-                # first CREATE TABLE fails there, and D1 applies none of a failed
-                # import. The command line refuses a target holding any table
-                # before it sends one.
-                out.write("DELETE FROM sqlite_sequence;\n")
-                _write_rows(connection, "sqlite_sequence", out)
+                _write_sequence_marks(connection, tables, out)
             # In the order the export created them, which is the source's own: an
             # export lists them as the source's catalog does. SQLite settles an
             # exact cost tie between indexes of one table by which was created
@@ -518,6 +511,11 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
             if _has_table(connection, "sqlite_stat1"):
                 # sqlite_stat1 is a reserved name that cannot be created, so an
                 # ANALYZE brings it into being; a D1 export opens the same way.
+                # Analyzing sqlite_schema alone writes no statistics, so this
+                # DELETE clears only what the target held before. Left unscoped
+                # on purpose: a foreign table's statistics are lost with it,
+                # which ANALYZE restores, whereas a lost sequence mark above
+                # would hand out an id again.
                 out.write("ANALYZE sqlite_schema;\nDELETE FROM sqlite_stat1;\n")
                 _write_rows(connection, "sqlite_stat1", out)
                 # A connection plans from the statistics it last loaded, and D1
@@ -527,6 +525,40 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
                 out.write("ANALYZE sqlite_master;\n")
     finally:
         connection.close()
+
+
+def _write_sequence_marks(
+    connection: sqlite3.Connection, tables: list[str], out: typing.TextIO
+) -> None:
+    """The source's AUTOINCREMENT marks, without touching anyone else's.
+
+    Inserting the rows set a mark for every AUTOINCREMENT table among them, and
+    the source's marks replace those. Nothing else on the target is cleared or
+    overwritten: the empty-target check is a read made before the import, so a
+    table someone else creates there meanwhile can hold a mark of its own, and
+    a lost mark lets its next insert reuse an id. The comparison then fails on
+    that table. The DELETE names only this file's tables; the file cannot run
+    against a database already holding one, since its CREATE TABLE fails there
+    and D1 applies none of a failed import.
+
+    A mark naming no table in the file - SQLite lets an application write such
+    a row - is refused. Whether the target holds a table of that name by the
+    time the import runs is unknowable here, and a mark written onto one would
+    move the ids it hands out.
+    """
+    owned = set(tables)
+    marks = connection.execute("SELECT name, seq FROM sqlite_sequence").fetchall()
+    # Counted, never named: an application wrote these names, so they are
+    # values like any other row's.
+    orphans = {name for name, _ in marks if name not in owned}
+    if orphans:
+        raise SnapshotError(
+            f"sqlite_sequence.name holds {len(orphans)} name(s) no table has, "
+            "which a copy cannot place without risking another table's ids"
+        )
+    named = ",".join(_literal(table, "sqlite_sequence.name") for table in tables)
+    out.write(f"DELETE FROM sqlite_sequence WHERE name IN ({named});\n")
+    _write_rows(connection, "sqlite_sequence", out)
 
 
 @dataclasses.dataclass(frozen=True)
