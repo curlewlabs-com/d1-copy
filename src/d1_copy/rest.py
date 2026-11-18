@@ -180,8 +180,12 @@ class D1Client:
             retry=not mutates,
         )
         results = answer.get("result") or []
+        # A result with no rows list is not an empty answer: the callers decide
+        # "empty target" and "nothing to refuse" from these rows.
         if len(results) != len(statements) or not all(
-            isinstance(result, dict) and result.get("success") is True
+            isinstance(result, dict)
+            and result.get("success") is True
+            and isinstance(result.get("results"), list)
             for result in results
         ):
             raise D1Error(
@@ -189,9 +193,7 @@ class D1Client:
                 f"not get that many successes back"
             )
         return [
-            QueryResult(
-                list(result.get("results") or []), dict(result.get("meta") or {})
-            )
+            QueryResult(list(result["results"]), dict(result.get("meta") or {}))
             for result in results
         ]
 

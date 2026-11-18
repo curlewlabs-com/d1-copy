@@ -229,7 +229,12 @@ D1 applies none of a failed import.
   being filled.
 - **The NUL restoration runs after the dump's triggers exist.** It is done by
   `UPDATE` on the local working copy, so an `UPDATE` trigger in the schema runs
-  there too, and can change that copy, on both sides alike.
+  there too, and can change that copy, on both sides alike. It also covers
+  application tables only: a NUL in a table or index name recorded in
+  `sqlite_sequence` or `sqlite_stat1` is left as the loader's placeholder.
+- **A terminating signal that arrives while a run is already removing its
+  working files stops the removal.** A later signal is held off once one has
+  arrived, but the first one is not. What is left is removed by the next run.
 - **A dump is executed by SQLite without restriction.** A restore file can
   `ATTACH` another local database file and change it. Restore only from an
   export you trust.

@@ -71,7 +71,9 @@ class RetryTest(unittest.TestCase):
     def test_an_authentication_rejection_is_repeated_even_for_a_mutation(self) -> None:
         """A token minted moments ago is refused for its first seconds, and a
         refused call ran nothing."""
-        answers = _Answers(401, {"success": True, "result": [{"success": True}]})
+        answers = _Answers(
+            401, {"success": True, "result": [{"success": True, "results": []}]}
+        )
         client = self._client(answers)
         client.query("00000000-0000-4000-8000-000000000001", "SELECT 1", mutates=True)
         self.assertEqual(answers.calls, 2)
@@ -81,6 +83,17 @@ class RetryTest(unittest.TestCase):
         with self.assertRaisesRegex(rest.D1Error, "HTTP 401"):
             self._client(answers).databases()
         self.assertEqual(answers.calls, 4)
+
+    def test_a_result_without_its_rows_is_a_failure_not_an_empty_answer(
+        self,
+    ) -> None:
+        """The empty-target check and the check of what an export would change
+        both read "no rows" as "nothing there"; a malformed answer must not."""
+        answers = _Answers({"success": True, "result": [{"success": True}]})
+        with self.assertRaisesRegex(rest.D1Error, "successes back"):
+            self._client(answers).query(
+                "00000000-0000-4000-8000-000000000001", "SELECT 1", mutates=False
+            )
 
     def test_a_statement_with_a_semicolon_is_never_batched(self) -> None:
         """The API splits on it, and the answers would no longer line up."""

@@ -497,6 +497,12 @@ class UnexportableValueTest(unittest.TestCase):
     ) -> None:
         self.assertTrue(self._found("a\\rb\rc"))
 
+    def test_an_answer_missing_a_column_is_refused_rather_than_read_as_clean(
+        self,
+    ) -> None:
+        with self.assertRaises(snapshot.SnapshotError):
+            snapshot.unexportable_values("t", ["id", "v"], {"i0": 0, "r0": 0})
+
     def test_the_finding_names_the_column_and_never_the_value(self) -> None:
         found = "".join(self._found("never-print-this\\n\n"))
         self.assertIn("t.v", found)
@@ -525,6 +531,19 @@ class UnexportableValueInADumpTest(_Databases):
         self.assertEqual(
             self._found(beyond), ["authors.joined_at holds an integer beyond 2^53"]
         )
+
+    def test_planner_statistics_are_checked_like_any_copied_table(self) -> None:
+        """sqlite_stat1 is copied and compared, and its text is the names of
+        tables and indexes, so an export can rewrite it like any other."""
+        odd = '"x\\n\ny"'
+        database = self.database(
+            f"CREATE TABLE {odd} (id INTEGER PRIMARY KEY, k INTEGER);\n"
+            f"CREATE INDEX idx_odd ON {odd}(k);\n"
+            "ANALYZE sqlite_schema;\n"
+            "INSERT INTO sqlite_stat1 VALUES('x\\n' || char(10) || 'y', 'idx_odd', '1 1');\n"
+        )
+        found = snapshot.values_an_export_would_change(database)
+        self.assertIn(f"sqlite_stat1.tbl holds {snapshot.UNEXPORTABLE['n']}", found)
 
     def test_a_sequence_mark_beyond_it_is_found_too(self) -> None:
         """sqlite_sequence is copied like any table and read back the same way."""

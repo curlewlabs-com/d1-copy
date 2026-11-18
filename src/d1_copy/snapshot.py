@@ -388,7 +388,13 @@ def unexportable_values(
     table: str, columns: list[str], answer: typing.Mapping[str, object]
 ) -> list[str]:
     """What unexportable_sql's `answer` found, as `table.column holds ...`. Names
-    the column and the kind of value, never the value."""
+    the column and the kind of value, never the value. An answer missing one of
+    the expected columns is refused, so a partial answer never reads as clean."""
+    expected = {
+        f"{letter}{index}" for letter in UNEXPORTABLE for index in range(len(columns))
+    }
+    if not expected <= answer.keys():
+        raise SnapshotError(f"the check of {table} came back without every column")
     return [
         f"{table}.{column} holds {reason}"
         for index, column in enumerate(columns)
@@ -411,8 +417,7 @@ def values_an_export_would_change(database: pathlib.Path) -> list[str]:
     try:
         found = []
         tables = [*application_tables(connection)]
-        if _has_table(connection, "sqlite_sequence"):
-            tables.append("sqlite_sequence")
+        tables += [t for t in _SQLITE_TABLES_COMPARED if _has_table(connection, t)]
         for table in tables:
             columns = [
                 str(row[1])

@@ -70,6 +70,11 @@ _TABLES_SQL = (
 )
 
 
+# SQLite's tables that a copy carries along with the application's, and so whose
+# values an export has to carry too.
+_BOOKKEEPING_TABLES = ("sqlite_sequence", "sqlite_stat1")
+
+
 class Refusal(RuntimeError):
     """A precondition failed. Nothing was written."""
 
@@ -107,7 +112,7 @@ def _values_an_export_would_change(
     many rows as the database holds. That is metered, and it is said out loud on
     every run rather than left to be inferred.
     """
-    tables = [*_application_tables(client, source), "sqlite_sequence"]
+    tables = [*_application_tables(client, source), *_BOOKKEEPING_TABLES]
     # Batched, because a round trip per table adds up to seconds on a database
     # with many tables, and a caller may be holding writes paused meanwhile.
     described = client.query_many(
@@ -118,11 +123,15 @@ def _values_an_export_would_change(
         ],
         mutates=False,
     )
+    # A bookkeeping table a database has not created describes as no columns;
+    # an application table never does, so one that did is an incomplete answer.
     probes = [
         (table, [str(row["name"]) for row in info.rows])
         for table, info in zip(tables, described, strict=True)
-        if info.rows
+        if info.rows or table not in _BOOKKEEPING_TABLES
     ]
+    if any(not columns for _, columns in probes):
+        raise rest.D1Error(f"{source}: a table described as having no columns")
     answers = client.query_many(
         source.uuid,
         [snapshot.unexportable_sql(table, columns) for table, columns in probes],
@@ -135,10 +144,14 @@ def _values_an_export_would_change(
     return [
         found
         for (table, columns), answer in zip(probes, answers, strict=True)
-        for found in snapshot.unexportable_values(
-            table, columns, answer.rows[0] if answer.rows else {}
-        )
+        for found in snapshot.unexportable_values(table, columns, _one(answer))
     ]
+
+
+def _one(answer: rest.QueryResult) -> dict[str, object]:
+    if len(answer.rows) != 1:
+        raise rest.D1Error(f"an aggregate query answered {len(answer.rows)} row(s)")
+    return answer.rows[0]
 
 
 def _refuse_what_an_export_cannot_carry(
