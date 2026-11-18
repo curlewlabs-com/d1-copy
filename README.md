@@ -77,7 +77,7 @@ produce the file these traps are in.
 ## How to use it
 
 ```sh
-python3 -m pip install "d1-copy @ git+https://github.com/curlewlabs-com/d1-copy@v0.1.0"
+python3 -m pip install "d1-copy @ git+https://github.com/curlewlabs-com/d1-copy@v0.2.0"
 
 export CLOUDFLARE_ACCOUNT_ID=...
 export CLOUDFLARE_API_TOKEN=...   # D1 Edit on the account
@@ -88,7 +88,9 @@ d1-copy verify  --source my-db --target my-db-copy
 d1-copy check   --source my-db
 ```
 
-`python3 -m d1_copy ...` is the same command.
+`python3 -m d1_copy ...` is the same command. The command is the supported
+interface. The Python modules behind it can be imported, but before 1.0 they
+can change in any release, so pin an exact version if you use them.
 
 The token needs D1 Edit (write access): the export endpoint is a write-classed
 call even though it changes nothing. The token is sent only to the Cloudflare
@@ -268,7 +270,10 @@ D1 applies none of a failed import.
   statements read exactly as SQLite reads them; until that is done, the
   placeholder and its `UPDATE` stay.
 - **A row that references a later row of its own table** is written in the
-  table's own order, and D1's import then fails.
+  table's own order, and D1's import then fails. Ordering such rows means
+  finding each row's parent exactly as SQLite's foreign-key check does and
+  telling every row apart, whatever the table names its columns; until that
+  is done, the rows keep the table's order.
 
 ## License
 
