@@ -16,6 +16,7 @@ import unittest
 from typing import override
 
 from d1_copy import snapshot
+from tests.fake_d1 import exported
 
 # The shape a D1 export has: a deferred-foreign-key pragma, the schema, the rows,
 # the sequence table. A parent and a cascading child, and a BLOB-keyed table, so
@@ -434,6 +435,91 @@ class RefusedBeforeWritingTest(_Databases):
             snapshot.write_import_sql(source, self.root / "import.sql")
 
 
+# Lines of an export taken from a remote D1 database, kept byte for byte
+# (tests/data/remote-export-text.sql), and what the same database answered for
+# hex(t) when read live. The two were captured from the same database, so the
+# export's claim to carry text exactly is checked against D1 itself rather than
+# against a model of it.
+REMOTE_EXPORT = pathlib.Path(__file__).parent / "data" / "remote-export-text.sql"
+REMOTE_TEXT_HEX = {
+    1: "610A62",  # lf_only
+    2: "615C6E62",  # lit_n_only
+    3: "610A625C6E63",  # lf_and_lit_n
+    4: "610D62",  # cr_only
+    5: "615C7262",  # lit_r_only
+    6: "610D625C7263",  # cr_and_lit_r
+    7: "610D0A625C725C6E63",  # crlf_and_lit_rn
+    8: "610A625C7263",  # lf_and_lit_r
+    9: "615C0A62",  # backslash_then_lf
+    10: "615C5C6E0A62",  # lit_bs_bs_n_and_lf
+    13: "610A625C6E635C30313264",  # lf_lit_n_lit_012
+    14: "610A5C6E5C3031325C303031325C30303031325C7830615C75303030615C31305C3132",  # lf_many_sentinels
+    15: "610D625C72635C30313564",  # cr_lit_r_lit_015
+    16: "610A625C30313263",  # lf_lit_012_only
+    17: "610A625C",  # lf_trailing_bs
+    18: "615C0A5C6E62",  # bs_lf_lit_n
+    19: "610A5C5C303132",  # lf_bs_012
+    20: "610A5C6E5C5C303132",  # lf_lit_n_bs_012
+    21: "610A0D5C6E5C725C3031325C3031355C303031325C30303135",  # lf_cr_both_lits_and_octals
+    22: "5C6E5C3031320A",  # lit_012_trailing_lf
+    23: "610A5C6E5C303132285C6E3029",  # lf_lits_n_012_paren0
+    24: "610A5C6E5C303132285C6E3029285C6E3129285C6E3229285C6E3329285C6E3429285C6E3529285C6E3629285C6E3729285C6E3829285C6E3929285C6E313029285C6E313129",  # lf_lits_paren0_to_9
+    25: "285C6E0A30295C6E5C303132285C6E300A29",  # lf_paren_fragments
+    26: "285C7230295C725C3031355C6E5C303132285C6E30290D0A0D",  # cr_lf_paren_cross
+    27: "5C285C6E30290A5C6E5C303132",  # lf_lit_bs_paren
+}
+
+
+class RemoteExportTest(_Databases):
+    def _text_hex(self, database: pathlib.Path) -> dict[int, str]:
+        connection = sqlite3.connect(database)
+        try:
+            return dict(connection.execute("SELECT id, hex(t) FROM s"))
+        finally:
+            connection.close()
+
+    def test_text_with_line_breaks_beside_their_escapes_loads_back_exactly(
+        self,
+    ) -> None:
+        """The reason text is not refused: remote D1 escapes each line break
+        with something the value does not hold, so every one of these - a
+        literal backslash-n beside a newline, and the values built to make an
+        escape match in the wrong place - reads back as D1 held it."""
+        source = self.root / "source.db"
+        snapshot.load_dump(REMOTE_EXPORT, source)
+        self.assertEqual(self._text_hex(source), REMOTE_TEXT_HEX)
+
+    def test_the_copy_of_that_text_is_exact(self) -> None:
+        source = self.root / "source.db"
+        snapshot.load_dump(REMOTE_EXPORT, source)
+        # The captured rows carry REAL values too, which a copy refuses; only
+        # the text is under test here.
+        connection = sqlite3.connect(source)
+        try:
+            for column in ("r", "i", "a"):
+                connection.execute(f"ALTER TABLE s DROP COLUMN {column}")
+            connection.commit()
+        finally:
+            connection.close()
+        target = self.copied(source)
+        self.assertEqual(snapshot.compare(source, target), [])
+        self.assertEqual(self._text_hex(target), REMOTE_TEXT_HEX)
+
+    def test_the_stand_in_writes_text_as_remote_d1_does(self) -> None:
+        """tests/fake_d1.py's export is what the command-line tests copy
+        through, so it is held to the captured bytes."""
+        lines = REMOTE_EXPORT.read_text(encoding="ascii").splitlines()
+        for row, hexed in REMOTE_TEXT_HEX.items():
+            with self.subTest(row=row):
+                written = exported(bytes.fromhex(hexed).decode())
+                (line,) = [
+                    line
+                    for line in lines
+                    if line.startswith('INSERT INTO "s" ') and f"VALUES({row}," in line
+                ]
+                self.assertIn(f",{written},", line)
+
+
 class UnexportableValueTest(unittest.TestCase):
     """The values an export does not carry exactly, asked of a live database.
 
@@ -463,7 +549,19 @@ class UnexportableValueTest(unittest.TestCase):
         limit = snapshot.EXPORT_SAFE_INTEGER
         self.assertEqual(
             self._found(
-                0, limit, -limit, None, b"\x00\n", "a\nb", "a\\nb", "a\r\nb", "a\\rb"
+                0,
+                limit,
+                -limit,
+                None,
+                b"\x00\n",
+                "a\nb",
+                "a\\nb",
+                "a\r\nb",
+                "a\\rb",
+                # Remote D1's export escapes a line break with something the
+                # value does not hold, so the literal beside it survives.
+                "a\\nb\nc",
+                "a\\rb\rc",
             ),
             [],
         )
@@ -485,28 +583,17 @@ class UnexportableValueTest(unittest.TestCase):
         the INTEGER 1, and both exports agree on the INTEGER."""
         self.assertEqual(self._found(1.0), ["t.v holds a REAL value"])
 
-    def test_text_with_a_newline_and_a_literal_backslash_n_is_found(self) -> None:
-        """The export turns the literal into a second newline, on both sides."""
-        self.assertEqual(
-            self._found("a\\nb\nc"),
-            [f"t.v holds {snapshot.UNEXPORTABLE['n']}"],
-        )
-
-    def test_text_with_a_carriage_return_and_a_literal_backslash_r_is_found(
-        self,
-    ) -> None:
-        self.assertTrue(self._found("a\\rb\rc"))
-
     def test_an_answer_missing_a_column_is_refused_rather_than_read_as_clean(
         self,
     ) -> None:
         with self.assertRaises(snapshot.SnapshotError):
-            snapshot.unexportable_values("t", ["id", "v"], {"i0": 0, "r0": 0})
+            snapshot.unexportable_values("t", ["id", "v"], {"i0": 0, "r0": 0, "i1": 0})
 
     def test_the_finding_names_the_column_and_never_the_value(self) -> None:
-        found = "".join(self._found("never-print-this\\n\n"))
+        value = snapshot.EXPORT_SAFE_INTEGER + 123457
+        found = "".join(self._found(value))
         self.assertIn("t.v", found)
-        self.assertNotIn("never-print-this", found)
+        self.assertNotIn(str(value), found)
 
 
 class UnexportableValueInADumpTest(_Databases):
@@ -533,17 +620,16 @@ class UnexportableValueInADumpTest(_Databases):
         )
 
     def test_planner_statistics_are_checked_like_any_copied_table(self) -> None:
-        """sqlite_stat1 is copied and compared, and its text is the names of
-        tables and indexes, so an export can rewrite it like any other."""
-        odd = '"x\\n\ny"'
+        """sqlite_stat1 is copied and compared, and its columns have no declared
+        type, so it can hold a value an export changes like any other table."""
         database = self.database(
-            f"CREATE TABLE {odd} (id INTEGER PRIMARY KEY, k INTEGER);\n"
-            f"CREATE INDEX idx_odd ON {odd}(k);\n"
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, k INTEGER);\n"
+            "CREATE INDEX idx_t ON t(k);\n"
             "ANALYZE sqlite_schema;\n"
-            "INSERT INTO sqlite_stat1 VALUES('x\\n' || char(10) || 'y', 'idx_odd', '1 1');\n"
+            f"INSERT INTO sqlite_stat1 VALUES('t', 'idx_t', {snapshot.EXPORT_SAFE_INTEGER + 1});\n"
         )
         found = snapshot.values_an_export_would_change(database)
-        self.assertIn(f"sqlite_stat1.tbl holds {snapshot.UNEXPORTABLE['n']}", found)
+        self.assertIn("sqlite_stat1.stat holds an integer beyond 2^53", found)
 
     def test_a_sequence_mark_beyond_it_is_found_too(self) -> None:
         """sqlite_sequence is copied like any table and read back the same way."""

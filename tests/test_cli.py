@@ -130,34 +130,65 @@ class CommandTest(unittest.TestCase):
         self.assertFalse(any("/export" in path for path in self.api.paths("POST")))
         self.assertEqual(snapshot_tables(target), [])
 
-    def test_values_an_export_rewrites_are_refused_before_export(self) -> None:
-        """Each of these leaves the export changed, and both sides' exports
-        agree on the change: so the copy would verify while differing from the
-        live source. The refusal names the column, never the value."""
-        cases = {
-            # Written as `1`, it reads back into a column of no type as an INTEGER.
+    def test_a_whole_number_real_is_refused_before_export(self) -> None:
+        """Written as `1`, it reads back into a column of no type as an INTEGER,
+        and both sides' exports agree on the INTEGER: so the copy would verify
+        while differing from the live source. The refusal names the column."""
+        self.api.create(
+            "source",
             "CREATE TABLE notes (id INTEGER PRIMARY KEY, v); "
-            "INSERT INTO notes VALUES (1, 1.0);": "notes.v holds a REAL value",
-            # The literal backslash-n comes back as a second newline.
+            "INSERT INTO notes VALUES (1, 1.0);",
+        )
+        self.api.create("target")
+        status, output = self.run_command(
+            "copy", "--source", "source", "--target", "target"
+        )
+        self.assertEqual(status, 2, output)
+        self.assertIn("notes.v holds a REAL value", output)
+        self.assertFalse(any("/export" in path for path in self.api.paths("POST")))
+
+    def test_text_an_export_escapes_or_an_import_would_cut_is_copied_exactly(
+        self,
+    ) -> None:
+        """Line breaks beside their own escaped forms come back from D1's export
+        as they went in, so they copy rather than refuse. A NUL ends D1's import
+        of a file that holds it raw, silently and with success reported, so the
+        import file must never hold one: a row lost that way would show here as
+        a difference."""
+        values = [
+            "a\\nb\nc",
+            "a\\rb\rc",
+            "a\r\nb\\r\\nc\\012(\\n0)",
+            "a\x00b",
+        ]
+        rows = ", ".join(
+            f"({index}, CAST(X'{value.encode().hex()}' AS TEXT))"
+            for index, value in enumerate(values, start=1)
+        )
+        source = self.api.create(
+            "source",
             "CREATE TABLE notes (id INTEGER PRIMARY KEY, v TEXT) STRICT; "
-            "INSERT INTO notes VALUES (1, 'never-print-this\\n' || char(10));": (
-                "notes.v holds text holding both a newline and a literal \\n"
-            ),
-        }
-        for index, (sql, expected) in enumerate(cases.items()):
-            with self.subTest(expected=expected):
-                self.api.create(f"source-{index}", sql)
-                self.api.create(f"target-{index}")
-                self.api.requests.clear()
-                status, output = self.run_command(
-                    "copy", "--source", f"source-{index}", "--target", f"target-{index}"
+            f"INSERT INTO notes VALUES {rows}; "
+            "CREATE TABLE after_notes (id INTEGER PRIMARY KEY) STRICT; "
+            "INSERT INTO after_notes VALUES (1);",
+        )
+        target = self.api.create("target")
+        status, output = self.run_command(
+            "copy", "--source", "source", "--target", "target"
+        )
+        self.assertEqual(status, 0, output)
+        self.assert_exact(source, target)
+        connection = sqlite3.connect(target)
+        try:
+            copied = [
+                bytes.fromhex(hexed).decode()
+                for (hexed,) in connection.execute(
+                    "SELECT hex(v) FROM notes ORDER BY id"
                 )
-                self.assertEqual(status, 2, output)
-                self.assertIn(expected, output)
-                self.assertNotIn("never-print-this", output)
-                self.assertFalse(
-                    any("/export" in path for path in self.api.paths("POST"))
-                )
+            ]
+        finally:
+            connection.close()
+        self.assertEqual(copied, values)
 
     def test_a_table_name_shaped_like_a_wildcard_is_still_checked(self) -> None:
         """`_` matches any character in LIKE, so a filter written as
