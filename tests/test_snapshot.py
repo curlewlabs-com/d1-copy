@@ -363,6 +363,112 @@ class ForeignKeyCycleTest(_Databases):
             snapshot.write_import_sql(source, self.root / "import.sql")
 
 
+class ForeignKeyPlanTest(_Databases):
+    """Which foreign keys order the rows, and which columns may be held back to
+    break a cycle. Each case is a schema D1 accepts and the import file once
+    got wrong; each copy is loaded with foreign keys enforced, one statement at
+    a time."""
+
+    def assert_copies_exactly(self, dump: str) -> None:
+        source = self.database(dump)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
+    def test_a_reference_naming_its_parent_in_another_case_still_orders_it(
+        self,
+    ) -> None:
+        """SQLite matches the name without regard to case, so the parent must
+        still be written first."""
+        self.assert_copies_exactly(
+            "CREATE TABLE letters (id INTEGER PRIMARY KEY, "
+            "writer INTEGER NOT NULL REFERENCES PEOPLE(ID)) STRICT;\n"
+            "CREATE TABLE people (id INTEGER PRIMARY KEY) STRICT;\n"
+            'INSERT INTO "people" ("id") VALUES(1);\n'
+            'INSERT INTO "letters" ("id","writer") VALUES(1,1);\n'
+        )
+
+    def test_names_alike_only_beyond_ascii_case_stay_apart(self) -> None:
+        """SQLite folds case for ASCII letters only, so `k` and the Kelvin sign
+        name different tables; folded together, this chain would read as a
+        cycle with no break and be refused."""
+        kelvin = "\u212a"
+        self.assert_copies_exactly(
+            f'CREATE TABLE "{kelvin}" (id INTEGER PRIMARY KEY, '
+            "a_id INTEGER NOT NULL REFERENCES a(id)) STRICT;\n"
+            "CREATE TABLE a (id INTEGER PRIMARY KEY, "
+            "k_id INTEGER NOT NULL REFERENCES k(id)) STRICT;\n"
+            "CREATE TABLE k (id INTEGER PRIMARY KEY) STRICT;\n"
+            'INSERT INTO "k" ("id") VALUES(1);\n'
+            'INSERT INTO "a" ("id","k_id") VALUES(1,1);\n'
+            f'INSERT INTO "{kelvin}" ("id","a_id") VALUES(1,1);\n'
+        )
+
+    def test_a_table_named_like_a_pragma_function_is_copied(self) -> None:
+        """An application table takes precedence over the table-valued function
+        of the same name, so the plan must not read SQLite's metadata through
+        one."""
+        self.assert_copies_exactly(
+            "CREATE TABLE pragma_table_list (k TEXT PRIMARY KEY, v TEXT);\n"
+            'INSERT INTO "pragma_table_list" ("k","v") VALUES(\'a\',\'b\');\n'
+        )
+
+    def test_a_cycle_breaks_at_one_nullable_column_of_a_composite_key(
+        self,
+    ) -> None:
+        """SQLite checks a composite key only when every column holds a value,
+        so one NULL column is enough to write the row first."""
+        self.assert_copies_exactly(
+            "CREATE TABLE shelves (id INTEGER PRIMARY KEY, room INTEGER NOT NULL, "
+            "spot INTEGER, FOREIGN KEY (room, spot) REFERENCES places(room, spot)) "
+            "STRICT;\n"
+            "CREATE TABLE places (room INTEGER NOT NULL, spot INTEGER NOT NULL, "
+            "shelf INTEGER NOT NULL REFERENCES shelves(id), PRIMARY KEY (room, spot)) "
+            "STRICT;\n"
+            'INSERT INTO "shelves" ("id","room","spot") VALUES(1,4,7);\n'
+            'INSERT INTO "places" ("room","spot","shelf") VALUES(4,7,1);\n'
+        )
+
+    def test_a_column_another_key_points_at_is_never_held_back(self) -> None:
+        """Held back, it would be NULL when the rows that point at it are
+        written; the cycle is broken at a column nothing points at instead."""
+        self.assert_copies_exactly(
+            "CREATE TABLE authors (id INTEGER PRIMARY KEY, "
+            "featured BLOB UNIQUE REFERENCES posts(id)) STRICT;\n"
+            "CREATE TABLE posts (id BLOB PRIMARY KEY, "
+            "author_id INTEGER REFERENCES authors(id)) STRICT;\n"
+            "CREATE TABLE quotes (id INTEGER PRIMARY KEY, "
+            "featured BLOB NOT NULL REFERENCES authors(featured)) STRICT;\n"
+            'INSERT INTO "authors" ("id","featured") VALUES(1,X\'aa\');\n'
+            'INSERT INTO "posts" ("id","author_id") VALUES(X\'aa\',1);\n'
+            'INSERT INTO "quotes" ("id","featured") VALUES(1,X\'aa\');\n'
+        )
+
+    def test_a_cycle_that_breaks_only_where_a_key_can_hold_null_is_refused(
+        self,
+    ) -> None:
+        """A held-back column is restored by primary key, and a row whose key
+        is NULL cannot be found that way. SQLite allows that key only in an
+        ordinary table, outside a lone INTEGER PRIMARY KEY - and one declared
+        DESC is not the rowid, so it allows it too."""
+        for key in ("k TEXT PRIMARY KEY", "k INTEGER PRIMARY KEY DESC"):
+            with self.subTest(key=key):
+                source = self.database(
+                    f"CREATE TABLE nodes ({key}, link INTEGER REFERENCES links(id));\n"
+                    "CREATE TABLE links (id INTEGER PRIMARY KEY, "
+                    "node NOT NULL REFERENCES nodes(k));\n"
+                )
+                with self.assertRaisesRegex(snapshot.SnapshotError, "cycle"):
+                    snapshot.write_import_sql(source, self.root / "import.sql")
+        self.assert_copies_exactly(
+            "CREATE TABLE nodes (k INTEGER PRIMARY KEY, "
+            "link INTEGER REFERENCES links(id));\n"
+            "CREATE TABLE links (id INTEGER PRIMARY KEY, "
+            "node INTEGER NOT NULL REFERENCES nodes(k));\n"
+            'INSERT INTO "nodes" ("k","link") VALUES(1,NULL);\n'
+            'INSERT INTO "links" ("id","node") VALUES(1,1);\n'
+            'UPDATE "nodes" SET "link" = 1;\n'
+        )
+
+
 class EmbeddedNulTest(_Databases):
     """TEXT can hold a NUL whenever callers can store arbitrary strings.
 

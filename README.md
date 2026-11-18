@@ -140,12 +140,17 @@ database (where foreign keys are not enforced, which is why it loads), and a new
 import file is written from that database:
 
 - **Every table is defined before any row is written**, and rows go in
-  parents-first, read from SQLite's own `foreign_key_list`. Foreign keys that
-  form a cycle are broken at a nullable column: that column is written as NULL
-  and restored by `UPDATE` once every row exists. A cycle with no nullable
-  column cannot be written in any order and is refused. An `INTEGER PRIMARY
-KEY` is never held back, although SQLite reports it as nullable: a NULL
-  written there becomes a new rowid rather than an absent value.
+  parents-first, read from SQLite's own `foreign_key_list`, with table and
+  column names matched as SQLite matches them, without regard to case. Foreign
+  keys that form a cycle are broken at a nullable column: that column is
+  written as NULL and restored by `UPDATE` once every row exists. One NULL
+  column of a composite key is enough, since SQLite checks such a key only
+  when every column holds a value. A column is never held back when it cannot
+  be restored safely: one in the primary key (SQLite reports an `INTEGER
+PRIMARY KEY` as nullable, but a NULL written there becomes a new rowid), one
+  another foreign key points at, or one in a table whose primary key can hold
+  NULL, since the restore finds its row by that key. A cycle that leaves no
+  such column cannot be written in any order and is refused.
 - **`sqlite_sequence` is written after the rows**, because inserting moves it,
   and an AUTOINCREMENT high-water mark can be higher than the highest surviving
   row.
@@ -180,7 +185,7 @@ What it refuses, each before the target is touched:
   both sides, because 2^53 + 1 and 2^53 export as the same number. `restore`
   asks the loaded dump. The live check reads each row of the database once,
   and the command prints what it read, since D1 meters rows read;
-- foreign keys that form a cycle with no nullable column;
+- foreign keys that form a cycle with no column that can be held back;
 - a dump that tries to `ATTACH` another database file;
 - an AUTOINCREMENT mark in `sqlite_sequence` whose name is not exactly that of
   a table being copied. SQLite lets an application write one, and finds a
@@ -259,15 +264,6 @@ D1 applies none of a failed import.
   placeholder and its `UPDATE` stay.
 - **A row that references a later row of its own table** is written in the
   table's own order, and D1's import then fails.
-- **A foreign key whose referenced table name differs in case** from the
-  table's own name is not used for ordering, and the import can fail.
-- **A cycle whose only nullable break is one column of a composite foreign key**
-  is refused, though it could be written.
-- **A nullable column chosen to break a cycle can itself be the key another
-  table's foreign key points at.** The import then fails.
-- **A held-back column is restored by primary key.** A row whose primary key
-  holds NULL, which only a table that is neither STRICT nor WITHOUT ROWID
-  allows, is not restored, and the comparison then fails.
 - **Indexes are created after every row is written.** A foreign key whose
   parent key is unique only through a separate `CREATE UNIQUE INDEX`, rather
   than a `UNIQUE` or `PRIMARY KEY` constraint in the table, then has no unique
