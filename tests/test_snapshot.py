@@ -125,8 +125,8 @@ class CompareTest(_Databases):
     def test_a_difference_never_carries_a_row_value(self) -> None:
         """The working databases hold the database's data, and this output can
         reach a CI log."""
-        secret = "'never-print-this-handle'"
-        changed = ROWS.replace("'a'", secret)
+        marker = "'never-print-this-handle'"
+        changed = ROWS.replace("'a'", marker)
         found = "\n".join(self.differences(SCHEMA + ROWS, SCHEMA + changed))
         self.assertIn("authors", found)
         self.assertNotIn("never-print-this-handle", found)
