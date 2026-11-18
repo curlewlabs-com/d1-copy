@@ -469,6 +469,117 @@ class ForeignKeyPlanTest(_Databases):
         )
 
 
+class UniqueParentIndexTest(_Databases):
+    """A foreign key may point at a key that only a separate CREATE UNIQUE INDEX
+    makes unique. SQLite refuses a child row until that index exists, so the
+    import file cannot leave it until after the rows."""
+
+    DUMP = (
+        "CREATE TABLE codes (id INTEGER PRIMARY KEY, code TEXT NOT NULL, "
+        "note TEXT) STRICT;\n"
+        "CREATE TABLE uses (id INTEGER PRIMARY KEY, "
+        "code TEXT NOT NULL REFERENCES codes(code)) STRICT;\n"
+        'INSERT INTO "codes" ("id","code","note") VALUES(1,\'a\',\'x\');\n'
+        'INSERT INTO "uses" ("id","code") VALUES(1,\'a\');\n'
+        "CREATE INDEX idx_codes_note ON codes(note);\n"
+        "CREATE UNIQUE INDEX idx_codes_code ON codes(code);\n"
+        "CREATE INDEX idx_uses_code ON uses(code);\n"
+    )
+
+    def test_the_parent_key_index_exists_before_the_child_rows(self) -> None:
+        source = self.database(self.DUMP)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
+    def test_that_tables_indexes_keep_the_sources_order(self) -> None:
+        """All of the parent table's indexes move together, so SQLite still
+        settles an exact cost tie between two of them as the source does."""
+        source = self.database(self.DUMP)
+        target = self.copied(source)
+        connection = sqlite3.connect(target)
+        try:
+            names = [
+                name
+                for (name,) in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'index' "
+                    "AND tbl_name = 'codes' ORDER BY rowid"
+                )
+            ]
+        finally:
+            connection.close()
+        self.assertEqual(names, ["idx_codes_note", "idx_codes_code"])
+
+    def test_only_the_index_a_parent_key_needs_goes_first(self) -> None:
+        """A cycle writes `featured` as NULL until every row exists. An
+        unrelated unique index over it would refuse the second NULL, so only
+        the index the parent key needs comes before the rows."""
+        dump = (
+            "CREATE TABLE authors (id INTEGER PRIMARY KEY, code TEXT NOT NULL, "
+            "featured INTEGER REFERENCES posts(id)) STRICT;\n"
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, "
+            "author_code TEXT NOT NULL REFERENCES authors(code)) STRICT;\n"
+            'INSERT INTO "authors" ("id","code","featured") VALUES(1,\'a\',1);\n'
+            'INSERT INTO "authors" ("id","code","featured") VALUES(2,\'b\',2);\n'
+            'INSERT INTO "posts" ("id","author_code") VALUES(1,\'a\');\n'
+            'INSERT INTO "posts" ("id","author_code") VALUES(2,\'b\');\n'
+            "CREATE UNIQUE INDEX idx_authors_code ON authors(code);\n"
+            "CREATE UNIQUE INDEX idx_authors_featured ON authors(coalesce(featured, 0));\n"
+        )
+        source = self.database(dump)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
+    def test_a_constraint_under_another_collation_does_not_serve(self) -> None:
+        """SQLite takes a parent key's index only under the column's own
+        collation, so here the separate index is the one that serves."""
+        dump = (
+            "CREATE TABLE codes (id INTEGER PRIMARY KEY, code TEXT NOT NULL, "
+            "UNIQUE (code COLLATE NOCASE)) STRICT;\n"
+            "CREATE TABLE uses (id INTEGER PRIMARY KEY, "
+            "code TEXT NOT NULL REFERENCES codes(code)) STRICT;\n"
+            'INSERT INTO "codes" ("id","code") VALUES(1,\'a\');\n'
+            'INSERT INTO "uses" ("id","code") VALUES(1,\'a\');\n'
+            "CREATE UNIQUE INDEX idx_codes_code ON codes(code);\n"
+        )
+        source = self.database(dump)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
+    def test_every_key_finds_its_own_index(self) -> None:
+        """Two keys into one parent, each unique only by its own index, and
+        two parents whose indexes were created in the other order: each key's
+        index is found for that key alone."""
+        dump = (
+            "CREATE TABLE codes (id INTEGER PRIMARY KEY, a TEXT NOT NULL, "
+            "b TEXT NOT NULL) STRICT;\n"
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY, t TEXT NOT NULL) STRICT;\n"
+            "CREATE TABLE uses (id INTEGER PRIMARY KEY, "
+            "a TEXT NOT NULL REFERENCES codes(a), b TEXT NOT NULL REFERENCES codes(b), "
+            "t TEXT NOT NULL REFERENCES tags(t)) STRICT;\n"
+            'INSERT INTO "codes" ("id","a","b") VALUES(1,\'x\',\'y\');\n'
+            'INSERT INTO "tags" ("id","t") VALUES(1,\'z\');\n'
+            'INSERT INTO "uses" ("id","a","b","t") VALUES(1,\'x\',\'y\',\'z\');\n'
+            "CREATE UNIQUE INDEX idx_tags_t ON tags(t);\n"
+            "CREATE UNIQUE INDEX idx_codes_b ON codes(b);\n"
+            "CREATE UNIQUE INDEX idx_codes_a ON codes(a);\n"
+        )
+        source = self.database(dump)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
+    def test_a_key_unique_by_constraint_moves_nothing(self) -> None:
+        """A UNIQUE constraint exists with its table, so the indexes stay after
+        the rows, as they always have."""
+        dump = self.DUMP.replace(
+            "code TEXT NOT NULL, note", "code TEXT NOT NULL UNIQUE, note"
+        )
+        source = self.database(dump)
+        import_sql = self.root / "import.sql"
+        snapshot.write_import_sql(source, import_sql)
+        lines = import_sql.read_text(encoding="utf-8").splitlines()
+        first_row = next(i for i, line in enumerate(lines) if line.startswith("INSERT"))
+        first_index = next(
+            i for i, line in enumerate(lines) if line.startswith("CREATE INDEX")
+        )
+        self.assertLess(first_row, first_index)
+
+
 class EmbeddedNulTest(_Databases):
     """TEXT can hold a NUL whenever callers can store arbitrary strings.
 
