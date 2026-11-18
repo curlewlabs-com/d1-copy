@@ -24,7 +24,7 @@ import pathlib
 import time
 import urllib.error
 import urllib.request
-from typing import Any, override
+from typing import Any, cast, override
 
 API = "https://api.cloudflare.com/client/v4"
 
@@ -118,12 +118,13 @@ class D1Client:
                     attempt += 1
                     continue
                 raise D1Error(f"{method} {_redact(url)} failed: {exc!r}") from exc
-            if not isinstance(parsed, dict) or parsed.get("success") is not True:
+            envelope = json_object(parsed)
+            if envelope is None or envelope.get("success") is not True:
                 raise D1Error(
                     f"{method} {_redact(url)} was refused: "
                     f"{_error_messages(json.dumps(parsed).encode())}"
                 )
-            return parsed
+            return envelope
 
     def _database_url(self, uuid: str, leaf: str = "") -> str:
         return f"{API}/accounts/{self._account}/d1/database/{uuid}{leaf}"
@@ -140,9 +141,9 @@ class D1Client:
                 None,
                 retry=True,
             )
-            batch = answer.get("result") or []
+            batch: list[dict[str, Any]] = answer.get("result") or []
             found.extend(Database(str(row["name"]), str(row["uuid"])) for row in batch)
-            info = answer.get("result_info") or {}
+            info: dict[str, Any] = answer.get("result_info") or {}
             if len(batch) < 100 or page * 100 >= int(info.get("total_count", 0) or 0):
                 return found
             page += 1
@@ -179,14 +180,11 @@ class D1Client:
             {"sql": ";\n".join(statements)},
             retry=not mutates,
         )
-        results = answer.get("result") or []
+        results: list[Any] = answer.get("result") or []
         # A result with no rows list is not an empty answer: the callers decide
         # "empty target" and "nothing to refuse" from these rows.
         if len(results) != len(statements) or not all(
-            isinstance(result, dict)
-            and result.get("success") is True
-            and isinstance(result.get("results"), list)
-            for result in results
+            _answered(result) for result in results
         ):
             raise D1Error(
                 f"query against {uuid} sent {len(statements)} statement(s) and did "
@@ -208,8 +206,9 @@ class D1Client:
         state = self._send("POST", url, {"output_format": "polling"}, retry=False)
         deadline = time.monotonic() + _POLL_LIMIT_SECONDS
         while True:
-            result = state.get("result") or {}
-            signed = (result.get("result") or {}).get("signed_url")
+            result: dict[str, Any] = state.get("result") or {}
+            exported: dict[str, Any] = result.get("result") or {}
+            signed = exported.get("signed_url")
             if isinstance(signed, str) and signed:
                 _download(signed, destination)
                 return
@@ -246,7 +245,7 @@ class D1Client:
         etag = hashlib.md5(payload, usedforsecurity=False).hexdigest()
         url = self._database_url(uuid, "/import")
         state = self._send("POST", url, {"action": "init", "etag": etag}, retry=False)
-        opened = state.get("result") or {}
+        opened: dict[str, Any] = state.get("result") or {}
         upload_url = opened.get("upload_url")
         if isinstance(upload_url, str) and upload_url:
             filename = opened.get("filename")
@@ -267,10 +266,11 @@ class D1Client:
         # would report a failure while the statements ran.
         deadline = time.monotonic() + _POLL_LIMIT_SECONDS
         while True:
-            result = state.get("result") or {}
+            result: dict[str, Any] = state.get("result") or {}
             status = result.get("status")
             if status == "complete":
-                return dict(result.get("result") or {})
+                summary: dict[str, Any] = result.get("result") or {}
+                return dict(summary)
             # An import answers with a success flag of its own inside the API
             # envelope's. A refused file arrives as an accepted request whose
             # inner flag is false, with no status and no bookmark, so it has to
@@ -341,11 +341,40 @@ def _error_messages(body: bytes) -> str:
         parsed: Any = json.loads(body)
     except ValueError:
         return "(unparseable body)"
-    errors = parsed.get("errors") if isinstance(parsed, dict) else None
-    if not isinstance(errors, list) or not errors:
+    envelope = json_object(parsed)
+    errors = json_array(envelope.get("errors")) if envelope is not None else None
+    if errors is None or not errors:
         return "(no error detail)"
     return "; ".join(
         f"{error.get('code')}: {error.get('message')}"
-        for error in errors
-        if isinstance(error, dict)
+        for error in map(json_object, errors)
+        if error is not None
+    )
+
+
+def json_object(value: object) -> dict[str, Any] | None:
+    """`value` as a decoded JSON object, or None when it is anything else.
+
+    The one place a decoded value's `isinstance(..., dict)` is narrowed, since
+    pyright reads that check as a dict of unknown keys and values. A JSON
+    object's keys are always strings.
+    """
+    return cast(dict[str, Any], value) if isinstance(value, dict) else None
+
+
+def json_array(value: object) -> list[Any] | None:
+    """`value` as a decoded JSON array, or None when it is anything else."""
+    if not isinstance(value, list):
+        return None
+    items: list[Any] = [*value]
+    return items
+
+
+def _answered(result: object) -> bool:
+    """Whether one statement of a batch came back successful, with a rows list."""
+    entry = json_object(result)
+    return (
+        entry is not None
+        and entry.get("success") is True
+        and isinstance(entry.get("results"), list)
     )

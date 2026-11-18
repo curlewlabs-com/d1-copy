@@ -58,10 +58,12 @@ class WorkdirTest(unittest.TestCase):
                 signalled: list[bool] = []
 
                 def interrupted_removal(
-                    *args: Any,
+                    path: str,
+                    *,
+                    dir_fd: int,
+                    ignore_errors: bool,
                     signum: int = signum,
                     signalled: list[bool] = signalled,
-                    **kwargs: Any,
                 ) -> None:
                     if not signalled:
                         signalled.append(True)
@@ -70,7 +72,7 @@ class WorkdirTest(unittest.TestCase):
                             # The handler runs at the next bytecode boundary;
                             # this gives it one before the removal goes on.
                             time.sleep(0.2)
-                    remove(*args, **kwargs)
+                    remove(path, dir_fd=dir_fd, ignore_errors=ignore_errors)
 
                 before = signal.getsignal(signum)
                 with (

@@ -285,7 +285,7 @@ def _say_timings(timings: dict[str, float]) -> None:
 
 def _import_figures(summary: dict[str, object]) -> str:
     meta = summary.get("meta")
-    figures = meta if isinstance(meta, dict) else {}
+    figures = rest.json_object(meta) or {}
     return (
         " ".join(
             f"{key}={figures[key]}"

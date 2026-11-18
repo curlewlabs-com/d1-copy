@@ -18,7 +18,11 @@ from unittest import mock
 
 from d1_copy import rest
 
-_LISTING = {"success": True, "result": [], "result_info": {"total_count": 0}}
+_LISTING: dict[str, Any] = {
+    "success": True,
+    "result": [],
+    "result_info": {"total_count": 0},
+}
 
 
 class _Answers:
@@ -145,6 +149,50 @@ class RetryTest(unittest.TestCase):
         source.read_bytes.return_value = b"SELECT 1;"
         summary = client.import_file("00000000-0000-4000-8000-000000000001", source)
         self.assertEqual(summary, {"num_queries": 3})
+
+
+class ErrorDetailTest(unittest.TestCase):
+    """What an HTTP failure says about a body, which can hold anything: only
+    Cloudflare's own error messages are repeated, and a body of another shape
+    says so rather than being echoed."""
+
+    def test_only_the_error_messages_of_an_object_body_are_repeated(self) -> None:
+        body = json.dumps(
+            {
+                "errors": [{"code": 7003, "message": "no route"}, "stray", 5],
+                "result": "rows that must not be echoed",
+            }
+        ).encode()
+        self.assertEqual(rest._error_messages(body), "7003: no route")
+
+    def test_a_body_of_another_shape_is_not_echoed(self) -> None:
+        for body, said in (
+            (b"not json", "(unparseable body)"),
+            (b"[1, 2]", "(no error detail)"),
+            (b'{"errors": []}', "(no error detail)"),
+            (b'{"errors": "a string"}', "(no error detail)"),
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(rest._error_messages(body), said)
+
+    def test_a_batch_with_a_failed_statement_is_refused(self) -> None:
+        answers: list[dict[str, Any]] = [
+            {"success": True, "result": [{"success": False, "results": []}]},
+            {"success": True, "result": [{"success": True, "results": None}]},
+            {"success": True, "result": ["not an object"]},
+        ]
+        for answer in answers:
+            with (
+                self.subTest(answer=answer),
+                mock.patch("urllib.request.urlopen", _Answers(answer)),
+            ):
+                client = rest.D1Client("test-account", "test-token")
+                with self.assertRaisesRegex(rest.D1Error, "did not get that many"):
+                    client.query_many(
+                        "00000000-0000-4000-8000-000000000001",
+                        ["SELECT 1"],
+                        mutates=True,
+                    )
 
 
 if __name__ == "__main__":

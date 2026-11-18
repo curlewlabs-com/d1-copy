@@ -21,7 +21,7 @@ import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from typing import Any, Self
 from unittest import mock
 
@@ -57,7 +57,7 @@ class FakeD1:
         return path
 
     @contextlib.contextmanager
-    def serving(self) -> Iterator[None]:
+    def serving(self) -> Generator[None]:
         with mock.patch("urllib.request.urlopen", self._urlopen):
             yield
 
@@ -135,7 +135,7 @@ class FakeD1:
         connection = sqlite3.connect(database)
         connection.row_factory = sqlite3.Row
         try:
-            results = []
+            results: list[dict[str, Any]] = []
             for statement in sql.split(";\n"):
                 try:
                     rows = [dict(row) for row in connection.execute(statement)]

@@ -20,7 +20,7 @@ import signal
 import stat
 import sys
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Generator
 
 from .interrupting import Interrupting
 
@@ -72,7 +72,7 @@ def _open_parent() -> int:
 
 
 @contextlib.contextmanager
-def private_workdir() -> Iterator[pathlib.Path]:
+def private_workdir() -> Generator[pathlib.Path]:
     parent = _open_parent()
     try:
         # Held for the whole run. It is what makes the sweep below safe: without
@@ -99,7 +99,7 @@ def private_workdir() -> Iterator[pathlib.Path]:
 
 
 @contextlib.contextmanager
-def _run_directory(parent: int) -> Iterator[pathlib.Path]:
+def _run_directory(parent: int) -> Generator[pathlib.Path]:
     for leftover in os.listdir(parent):
         if leftover.startswith("run-"):
             # A run that was SIGKILLed had no chance to clean up. Its directory
