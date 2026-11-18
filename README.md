@@ -165,6 +165,9 @@ PRIMARY KEY` as nullable, but a NULL written there becomes a new rowid), one
   `'ab'`, and a raw NUL in the file would end D1's import there. D1 keeps such
   a value and exports the raw byte, which Python will not execute, so the
   loader swaps it for a token and puts it back afterwards.
+- **A dump touches no other file.** It is run with a SQLite authorizer that
+  refuses `ATTACH` and `DETACH`. A D1 export uses neither, and a restore file
+  that does could otherwise reach another database file on the machine.
 
 The comparison covers every application table as a multiset of rows (never by
 rowid, which an import reassigns for a table keyed by a BLOB), `sqlite_sequence`,
@@ -183,6 +186,7 @@ What it refuses, each before the target is touched:
   asks the loaded dump. The live check reads each row of the database once,
   and the command prints what it read, since D1 meters rows read;
 - foreign keys that form a cycle with no column that can be held back;
+- a dump that tries to `ATTACH` another database file;
 - an AUTOINCREMENT mark in `sqlite_sequence` whose name is not exactly that of
   a table being copied. SQLite lets an application write one, and finds a
   table's mark by its exact name, so such a mark belongs to no table here.
@@ -254,9 +258,10 @@ D1 applies none of a failed import.
   there too, and can change that copy, on both sides alike. It also covers
   application tables only: a NUL in a table or index name recorded in
   `sqlite_sequence` or `sqlite_stat1` is left as the loader's placeholder.
-- **A dump is executed by SQLite without restriction.** A restore file can
-  `ATTACH` another local database file and change it. Restore only from an
-  export you trust.
+  Putting the byte into each row as it loads, instead, means rewriting the
+  dump's text where it is a row's value and nowhere else, which needs its
+  statements read exactly as SQLite reads them; until that is done, the
+  placeholder and its `UPDATE` stay.
 - **A row that references a later row of its own table** is written in the
   table's own order, and D1's import then fails.
 - **Indexes are created after every row is written.** A foreign key whose

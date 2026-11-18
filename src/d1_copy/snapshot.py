@@ -106,6 +106,10 @@ def load_dump(dump: pathlib.Path, database: pathlib.Path) -> None:
     once the rows exist. No SQL is parsed to do it: a NUL cannot appear in valid
     SQL outside a string literal, and one that somehow did would surface as a
     schema difference.
+
+    ONLY THIS DATABASE IS WRITTEN. A dump is SQL, and SQL can ATTACH another
+    database file and write it. A D1 export never does, so a dump that tries is
+    refused (_refuse_other_files) rather than run.
     """
     if database.exists():
         raise SnapshotError(f"refusing to load over an existing file: {database}")
@@ -113,7 +117,9 @@ def load_dump(dump: pathlib.Path, database: pathlib.Path) -> None:
     token = _absent_token(raw) if b"\x00" in raw else None
     if token is not None:
         raw = raw.replace(b"\x00", token.encode())
+    refused: list[str] = []
     connection = sqlite3.connect(database)
+    connection.set_authorizer(_refuse_other_files(refused))
     try:
         # One transaction, and no durability. executescript otherwise commits each
         # statement by itself, and a dump of a database with a couple of hundred
@@ -132,9 +138,43 @@ def load_dump(dump: pathlib.Path, database: pathlib.Path) -> None:
         if token is not None:
             _restore_nuls(connection, token)
     except (sqlite3.Error, UnicodeDecodeError) as exc:
+        if refused:
+            raise SnapshotError(
+                f"{dump.name} tries to {refused[0]} another database file, which "
+                "a D1 export never does; it was not run"
+            ) from exc
         raise SnapshotError(f"{dump.name} did not load as SQL: {exc}") from exc
     finally:
         connection.close()
+
+
+def _refuse_other_files(
+    refused: list[str],
+) -> typing.Callable[[int, str | None, str | None, str | None, str | None], int]:
+    """A SQLite authorizer that denies reaching any database file but this one.
+
+    VACUUM INTO, the other statement that writes another file, asks for
+    SQLITE_ATTACH too, though inside load_dump's transaction it cannot run
+    anyway. What was denied goes into `refused`, so the refusal can say why
+    instead of SQLite's bare "not authorized".
+    """
+
+    def authorize(
+        action: int,
+        _first: str | None,
+        _second: str | None,
+        _database: str | None,
+        _trigger: str | None,
+    ) -> int:
+        if action == sqlite3.SQLITE_ATTACH:
+            refused.append("ATTACH")
+            return sqlite3.SQLITE_DENY
+        if action == sqlite3.SQLITE_DETACH:
+            refused.append("DETACH")
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    return authorize
 
 
 def _absent_token(raw: bytes) -> str:
