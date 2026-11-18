@@ -542,6 +542,27 @@ class UniqueParentIndexTest(_Databases):
         source = self.database(dump)
         self.assertEqual(snapshot.compare(source, self.copied(source)), [])
 
+    def test_every_key_finds_its_own_index(self) -> None:
+        """Two keys into one parent, each unique only by its own index, and
+        two parents whose indexes were created in the other order: each key's
+        index is found for that key alone."""
+        dump = (
+            "CREATE TABLE codes (id INTEGER PRIMARY KEY, a TEXT NOT NULL, "
+            "b TEXT NOT NULL) STRICT;\n"
+            "CREATE TABLE tags (id INTEGER PRIMARY KEY, t TEXT NOT NULL) STRICT;\n"
+            "CREATE TABLE uses (id INTEGER PRIMARY KEY, "
+            "a TEXT NOT NULL REFERENCES codes(a), b TEXT NOT NULL REFERENCES codes(b), "
+            "t TEXT NOT NULL REFERENCES tags(t)) STRICT;\n"
+            'INSERT INTO "codes" ("id","a","b") VALUES(1,\'x\',\'y\');\n'
+            'INSERT INTO "tags" ("id","t") VALUES(1,\'z\');\n'
+            'INSERT INTO "uses" ("id","a","b","t") VALUES(1,\'x\',\'y\',\'z\');\n'
+            "CREATE UNIQUE INDEX idx_tags_t ON tags(t);\n"
+            "CREATE UNIQUE INDEX idx_codes_b ON codes(b);\n"
+            "CREATE UNIQUE INDEX idx_codes_a ON codes(a);\n"
+        )
+        source = self.database(dump)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
     def test_a_key_unique_by_constraint_moves_nothing(self) -> None:
         """A UNIQUE constraint exists with its table, so the indexes stay after
         the rows, as they always have."""

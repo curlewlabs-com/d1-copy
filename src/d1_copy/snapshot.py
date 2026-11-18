@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import itertools
 import pathlib
 import sqlite3
 import typing
@@ -773,14 +774,18 @@ def _indexes_parent_keys_need(
     SQLite requires a foreign key's parent key to be its primary key or to
     have a unique index of exactly its columns, under their declared
     collation, when a child row is written, and says "foreign key mismatch"
-    when it compiles one that has neither. Which index that is, is asked of
-    SQLite itself rather than worked out from the schema: the tables alone are
-    created in an empty database, each one's INSERT is compiled, and wherever
-    SQLite reports a mismatch, the parent's separate unique indexes are tried
-    in the source's order until it stops. Only an index that settled one is
-    returned; every other index still follows the rows.
+    when it compiles one that has neither. Which index serves is asked of
+    SQLite itself rather than worked out from the schema, one foreign key at
+    a time: the tables alone are created in an empty database, with a probe
+    table holding that one key, and the probe's INSERT is compiled with each
+    of the parent's separate unique indexes in turn. The rule reads only the
+    parent's side, so the probe's untyped columns stand in for the child's.
+    The first index that compiles is the key's. Every other index still
+    follows the rows.
     """
-    scratch = sqlite3.connect(":memory:")
+    # No statement cache: the same probe INSERT is compiled again after every
+    # change to the indexes, and a cached EXPLAIN would answer for the old ones.
+    scratch = sqlite3.connect(":memory:", cached_statements=0)
     try:
         scratch.execute("PRAGMA foreign_keys=ON")
         for (definition,) in connection.execute(
@@ -796,37 +801,67 @@ def _indexes_parent_keys_need(
             )
             if _is_unique_and_whole(connection, str(name))
         ]
+        # Tables and indexes share one namespace in SQLite.
+        taken = {
+            _folded(str(name))
+            for (name,) in connection.execute("SELECT name FROM sqlite_schema")
+        }
+        probe = next(
+            name
+            for name in (f"d1_copy_probe_{n}" for n in itertools.count())
+            if _folded(name) not in taken
+        )
 
-        def mismatch(table: str) -> str | None:
+        def compiles(statement: str) -> bool:
             try:
-                scratch.execute(f"EXPLAIN INSERT INTO {_quoted(table)} DEFAULT VALUES")
+                scratch.execute(statement)
             except sqlite3.OperationalError as exc:
-                # Anything else that stops the compile says nothing about
-                # parent keys, and leaves the indexes where they were.
-                return str(exc) if "foreign key mismatch" in str(exc) else None
-            return None
+                # Anything else that stops the compile says nothing about a
+                # parent key; the key is left as it was.
+                return "foreign key mismatch" not in str(exc)
+            return True
 
         needed: set[str] = set()
         for table in tables:
-            parents = {
-                str(row[2])
-                for row in connection.execute(
-                    f"PRAGMA foreign_key_list({_quoted(table)})"
+            grouped: dict[int, list[tuple[int, str, str | None]]] = {}
+            for row in connection.execute(f"PRAGMA foreign_key_list({_quoted(table)})"):
+                grouped.setdefault(int(row[0]), []).append(
+                    (int(row[1]), str(row[2]), row[4])
                 )
-            }
-            for name, parent, definition in candidates:
-                found = mismatch(table)
-                if found is None:
-                    break
-                if name in needed or _folded(parent) not in {
-                    _folded(p) for p in parents
-                }:
-                    continue
-                scratch.execute(definition)
-                if mismatch(table) == found:
-                    scratch.execute(f"DROP INDEX {_quoted(name)}")
-                else:
-                    needed.add(name)
+            for parts in grouped.values():
+                parts.sort()
+                parent = parts[0][1]
+                columns = ",".join(f"c{seq}" for seq, _, _ in parts)
+                named = [to for _, _, to in parts]
+                pointed = (
+                    ""
+                    if any(to is None for to in named)
+                    else "(" + ",".join(_quoted(str(to)) for to in named) + ")"
+                )
+                scratch.execute(
+                    f"CREATE TABLE {_quoted(probe)} ({columns}, FOREIGN KEY "
+                    f"({columns}) REFERENCES {_quoted(parent)}{pointed})"
+                )
+                insert = f"EXPLAIN INSERT INTO {_quoted(probe)} DEFAULT VALUES"
+                try:
+                    if compiles(insert):
+                        continue
+                    for name, owner, definition in candidates:
+                        if _folded(owner) != _folded(parent):
+                            continue
+                        try:
+                            scratch.execute(definition)
+                        except sqlite3.Error:
+                            # An index the tables alone cannot carry serves no
+                            # key here.
+                            continue
+                        served = compiles(insert)
+                        scratch.execute(f"DROP INDEX {_quoted(name)}")
+                        if served:
+                            needed.add(name)
+                            break
+                finally:
+                    scratch.execute(f"DROP TABLE {_quoted(probe)}")
         return [
             (name, definition) for name, _, definition in candidates if name in needed
         ]
