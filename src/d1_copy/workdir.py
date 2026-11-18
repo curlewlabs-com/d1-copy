@@ -57,6 +57,10 @@ def _open_parent() -> int:
             raise WorkdirUnsafe(
                 f"{WORK_PARENT} is a symlink or not a directory; remove it"
             ) from exc
+        if exc.errno == errno.EACCES:
+            raise WorkdirUnsafe(
+                f"{WORK_PARENT} cannot be opened by this user; remove it"
+            ) from exc
         raise
     info = os.fstat(parent)
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:

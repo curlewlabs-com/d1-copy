@@ -82,10 +82,11 @@ class UnsafeParentTest(unittest.TestCase):
         (victim / "run-keep").mkdir(parents=True)
         (victim / "run-keep" / "data").write_text("kept", encoding="utf-8")
         self.parent.symlink_to(victim)
+        mode = victim.stat().st_mode
         self._refused()
         self.assertEqual((victim / "run-keep" / "data").read_text(), "kept")
         self.assertFalse((victim / "lock").exists())
-        self.assertEqual(victim.stat().st_mode & 0o777, 0o755 & ~_umask() & 0o777)
+        self.assertEqual(victim.stat().st_mode, mode)
 
     def test_a_directory_another_user_owns_is_refused(self) -> None:
         """Our dumps would land somewhere its owner can read and rearrange."""
@@ -102,15 +103,17 @@ class UnsafeParentTest(unittest.TestCase):
         self._refused()
         self.assertFalse((self.parent / "lock").exists())
 
+    def test_a_directory_this_user_cannot_open_is_refused(self) -> None:
+        """Another user's private directory cannot even be opened, so its owner
+        is never read; that is a refusal like the others, not a crash."""
+        self.parent.mkdir(mode=0o700)
+        self.parent.chmod(0)
+        self.addCleanup(self.parent.chmod, 0o700)
+        self._refused()
+
     def test_a_file_at_the_path_is_refused(self) -> None:
         self.parent.write_text("not a directory", encoding="utf-8")
         self._refused()
-
-
-def _umask() -> int:
-    mask = os.umask(0)
-    os.umask(mask)
-    return mask
 
 
 class InterruptingTest(unittest.TestCase):
