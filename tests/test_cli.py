@@ -269,7 +269,8 @@ class CommandTest(unittest.TestCase):
         self.api.create("target")
         self.run_command("copy", "--source", "source", "--target", "target")
         for _, where, authorized in self.api.requests:
-            self.assertEqual(authorized, where.startswith("api.cloudflare.com"), where)
+            host = where.split("/", 1)[0]
+            self.assertEqual(authorized, host == "api.cloudflare.com", where)
 
     def test_no_working_file_outlives_the_run(self) -> None:
         """The dumps and working databases are full copies of the source."""
