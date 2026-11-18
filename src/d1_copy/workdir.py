@@ -111,7 +111,7 @@ def _run_directory(parent: int) -> Iterator[pathlib.Path]:
     interrupting = Interrupting(sys.unraisablehook)
     previous = {
         signum: signal.signal(signum, interrupting.handle)
-        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGALRM)
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGALRM)
     }
     sys.unraisablehook = interrupting.redeliver
     ended_by: BaseException | None = None
@@ -121,7 +121,9 @@ def _run_directory(parent: int) -> Iterator[pathlib.Path]:
         ended_by = error
         raise
     finally:
-        # Disarmed first, so a redelivery cannot cut this cleanup short.
+        # Held, then disarmed, first, so no signal - one arriving now for the
+        # first time included - and no redelivery can cut this cleanup short.
+        interrupting.hold()
         signal.setitimer(signal.ITIMER_REAL, 0)
         sys.unraisablehook = interrupting.previous_hook
         shutil.rmtree(name, dir_fd=parent, ignore_errors=True)
