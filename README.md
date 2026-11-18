@@ -156,10 +156,12 @@ PRIMARY KEY` as nullable, but a NULL written there becomes a new rowid), one
   row.
 - **Indexes and triggers come after the rows**, in the order the source
   created them, because SQLite settles an exact cost tie between two indexes by
-  which was created later. The one exception is a table that a foreign key
-  points at through a key only a separate `CREATE UNIQUE INDEX` makes unique.
-  SQLite needs that index before the first child row, so all of that table's
-  indexes come before the rows, still in the source's order among themselves.
+  which was created later. The one exception is an index a foreign key's parent
+  key needs, when only a separate `CREATE UNIQUE INDEX` makes that key unique:
+  SQLite refuses a child row until it exists. Which index that is, is asked of
+  SQLite, by compiling each table's inserts against the tables alone. That
+  index is created before the rows, then dropped and created again after them
+  with the rest, so the source's order still holds.
 - **`sqlite_stat1` is copied and then reloaded** with `ANALYZE sqlite_master`.
   D1 was observed to plan from the statistics it last loaded and to ignore raw
   writes to the table until that reload.

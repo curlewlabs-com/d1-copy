@@ -523,18 +523,9 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
                 out.write(f"{definition};\n")
             plan = _insert_plan(connection, tables)
             # A foreign key whose parent key is unique only through a separate
-            # index needs that index before its first child row is written, so
-            # such a table's indexes come before every row - all of them, in
-            # the source's order, which keeps their order among themselves.
-            early = [
-                definition
-                for (definition, table) in connection.execute(
-                    "SELECT sql, tbl_name FROM sqlite_schema WHERE type = 'index' "
-                    "AND sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY rowid"
-                )
-                if table in plan.indexed_first
-            ]
-            for definition in early:
+            # index needs that index before its first child row is written.
+            early = _indexes_parent_keys_need(connection, tables)
+            for _, definition in early:
                 out.write(f"{definition};\n")
             locked = {LOCK_TABLE: {"locked": "1"}}
             for table in plan.tables:
@@ -560,9 +551,13 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
                 "SELECT sql FROM sqlite_schema WHERE type != 'table' AND sql IS NOT NULL "
                 "AND name NOT GLOB 'sqlite_*' ORDER BY rowid"
             ).fetchall()
+            # The early indexes are made again here, in the source's order with
+            # the rest: SQLite settles an exact cost tie between two indexes of
+            # a table by which was created later.
+            for name, _ in early:
+                out.write(f"DROP INDEX {_quoted(name)};\n")
             for (definition,) in others:
-                if definition not in early:
-                    out.write(f"{definition};\n")
+                out.write(f"{definition};\n")
             if _has_table(connection, "sqlite_stat1"):
                 # sqlite_stat1 is a reserved name that cannot be created, so an
                 # ANALYZE brings it into being; a D1 export opens the same way.
@@ -633,9 +628,6 @@ class _InsertPlan:
     tables: list[str]
     # table -> the columns written as NULL at insert and restored afterwards.
     deferred: dict[str, list[str]]
-    # Tables some foreign key points at through a key that only a separate
-    # CREATE UNIQUE INDEX makes unique (_unique_only_by_an_index).
-    indexed_first: set[str]
 
 
 def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPlan:
@@ -720,12 +712,6 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
     }
 
     deferred: dict[str, list[str]] = {}
-    indexed_first = {
-        key.parent
-        for keys_of in foreign.values()
-        for key in keys_of
-        if _unique_only_by_an_index(connection, key.parent, key.parent_columns)
-    }
     ordered: list[str] = []
     waiting = set(tables)
     while waiting:
@@ -766,7 +752,7 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
         ordered.append(freed)
         waiting.discard(freed)
 
-    return _InsertPlan(ordered, deferred, indexed_first)
+    return _InsertPlan(ordered, deferred)
 
 
 # SQLite folds case in names for ASCII letters only: `K` and the Kelvin sign
@@ -778,36 +764,89 @@ def _folded(name: str) -> str:
     return name.translate(_ASCII_LOWER)
 
 
-def _unique_only_by_an_index(
-    connection: sqlite3.Connection, table: str, key: tuple[str, ...]
-) -> bool:
-    """Whether `key` of `table` is unique through a CREATE UNIQUE INDEX alone.
+def _indexes_parent_keys_need(
+    connection: sqlite3.Connection, tables: list[str]
+) -> list[tuple[str, str]]:
+    """The separate indexes some foreign key's parent key needs, as (name, SQL)
+    in the source's order.
 
-    SQLite requires a foreign key's parent key to be unique when a child row is
-    written: its primary key, a UNIQUE constraint, or a unique index on exactly
-    those columns. The first two are part of the table and exist with it; a
-    separate index exists only once it is created. A partial index cannot serve
-    as a parent key, and is not counted.
+    SQLite requires a foreign key's parent key to be its primary key or to
+    have a unique index of exactly its columns, under their declared
+    collation, when a child row is written, and says "foreign key mismatch"
+    when it compiles one that has neither. Which index that is, is asked of
+    SQLite itself rather than worked out from the schema: the tables alone are
+    created in an empty database, each one's INSERT is compiled, and wherever
+    SQLite reports a mismatch, the parent's separate unique indexes are tried
+    in the source's order until it stops. Only an index that settled one is
+    returned; every other index still follows the rows.
     """
-    wanted = {_folded(column) for column in key}
-    if {_folded(column) for column in _primary_key(connection, table)} == wanted:
+    scratch = sqlite3.connect(":memory:")
+    try:
+        scratch.execute("PRAGMA foreign_keys=ON")
+        for (definition,) in connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' "
+            "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY rowid"
+        ):
+            scratch.execute(definition)
+        candidates = [
+            (str(name), str(table), str(definition))
+            for name, table, definition in connection.execute(
+                "SELECT name, tbl_name, sql FROM sqlite_schema WHERE type = 'index' "
+                "AND sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY rowid"
+            )
+            if _is_unique_and_whole(connection, str(name))
+        ]
+
+        def mismatch(table: str) -> str | None:
+            try:
+                scratch.execute(f"EXPLAIN INSERT INTO {_quoted(table)} DEFAULT VALUES")
+            except sqlite3.OperationalError as exc:
+                # Anything else that stops the compile says nothing about
+                # parent keys, and leaves the indexes where they were.
+                return str(exc) if "foreign key mismatch" in str(exc) else None
+            return None
+
+        needed: set[str] = set()
+        for table in tables:
+            parents = {
+                str(row[2])
+                for row in connection.execute(
+                    f"PRAGMA foreign_key_list({_quoted(table)})"
+                )
+            }
+            for name, parent, definition in candidates:
+                found = mismatch(table)
+                if found is None:
+                    break
+                if name in needed or _folded(parent) not in {
+                    _folded(p) for p in parents
+                }:
+                    continue
+                scratch.execute(definition)
+                if mismatch(table) == found:
+                    scratch.execute(f"DROP INDEX {_quoted(name)}")
+                else:
+                    needed.add(name)
+        return [
+            (name, definition) for name, _, definition in candidates if name in needed
+        ]
+    finally:
+        scratch.close()
+
+
+def _is_unique_and_whole(connection: sqlite3.Connection, index: str) -> bool:
+    """Whether `index` is UNIQUE and not partial, as a parent key's must be."""
+    found = connection.execute(
+        "SELECT tbl_name FROM sqlite_schema WHERE type = 'index' AND name = ?", (index,)
+    ).fetchone()
+    if found is None:
         return False
-    standalone = False
-    for _, name, unique, origin, partial in connection.execute(
-        f"PRAGMA index_list({_quoted(table)})"
-    ).fetchall():
-        if not unique or partial:
-            continue
-        indexed = {
-            _folded(str(row[2]))
-            for row in connection.execute(f"PRAGMA index_info({_quoted(str(name))})")
-        }
-        if indexed != wanted:
-            continue
-        if origin != "c":
-            return False
-        standalone = True
-    return standalone
+    for _, name, unique, _, partial in connection.execute(
+        f"PRAGMA index_list({_quoted(str(found[0]))})"
+    ):
+        if name == index:
+            return bool(unique) and not partial
+    return False
 
 
 def _table_columns(

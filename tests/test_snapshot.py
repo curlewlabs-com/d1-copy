@@ -508,6 +508,40 @@ class UniqueParentIndexTest(_Databases):
             connection.close()
         self.assertEqual(names, ["idx_codes_note", "idx_codes_code"])
 
+    def test_only_the_index_a_parent_key_needs_goes_first(self) -> None:
+        """A cycle writes `featured` as NULL until every row exists. An
+        unrelated unique index over it would refuse the second NULL, so only
+        the index the parent key needs comes before the rows."""
+        dump = (
+            "CREATE TABLE authors (id INTEGER PRIMARY KEY, code TEXT NOT NULL, "
+            "featured INTEGER REFERENCES posts(id)) STRICT;\n"
+            "CREATE TABLE posts (id INTEGER PRIMARY KEY, "
+            "author_code TEXT NOT NULL REFERENCES authors(code)) STRICT;\n"
+            'INSERT INTO "authors" ("id","code","featured") VALUES(1,\'a\',1);\n'
+            'INSERT INTO "authors" ("id","code","featured") VALUES(2,\'b\',2);\n'
+            'INSERT INTO "posts" ("id","author_code") VALUES(1,\'a\');\n'
+            'INSERT INTO "posts" ("id","author_code") VALUES(2,\'b\');\n'
+            "CREATE UNIQUE INDEX idx_authors_code ON authors(code);\n"
+            "CREATE UNIQUE INDEX idx_authors_featured ON authors(coalesce(featured, 0));\n"
+        )
+        source = self.database(dump)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
+    def test_a_constraint_under_another_collation_does_not_serve(self) -> None:
+        """SQLite takes a parent key's index only under the column's own
+        collation, so here the separate index is the one that serves."""
+        dump = (
+            "CREATE TABLE codes (id INTEGER PRIMARY KEY, code TEXT NOT NULL, "
+            "UNIQUE (code COLLATE NOCASE)) STRICT;\n"
+            "CREATE TABLE uses (id INTEGER PRIMARY KEY, "
+            "code TEXT NOT NULL REFERENCES codes(code)) STRICT;\n"
+            'INSERT INTO "codes" ("id","code") VALUES(1,\'a\');\n'
+            'INSERT INTO "uses" ("id","code") VALUES(1,\'a\');\n'
+            "CREATE UNIQUE INDEX idx_codes_code ON codes(code);\n"
+        )
+        source = self.database(dump)
+        self.assertEqual(snapshot.compare(source, self.copied(source)), [])
+
     def test_a_key_unique_by_constraint_moves_nothing(self) -> None:
         """A UNIQUE constraint exists with its table, so the indexes stay after
         the rows, as they always have."""
