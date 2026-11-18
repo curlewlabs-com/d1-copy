@@ -62,7 +62,7 @@ import sys
 import time
 
 from . import rest, snapshot
-from .workdir import WorkdirInUse, private_workdir
+from .workdir import WorkdirInUse, WorkdirUnsafe, private_workdir
 
 _TABLES_SQL = (
     "SELECT name FROM sqlite_schema WHERE type = 'table' "
@@ -404,7 +404,7 @@ def run(client: rest.D1Client, argv: list[str]) -> int:
     try:
         handler = args.handler
         result: int = handler(client, args)
-    except (Refusal, WorkdirInUse) as refusal:
+    except (Refusal, WorkdirInUse, WorkdirUnsafe) as refusal:
         print(f"[REFUSED] {refusal}", file=sys.stderr)
         return 2
     except (rest.D1Error, snapshot.SnapshotError) as failure:

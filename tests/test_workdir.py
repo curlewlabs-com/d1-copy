@@ -56,6 +56,63 @@ class WorkdirTest(unittest.TestCase):
             self.assertTrue(directory.exists())
 
 
+class UnsafeParentTest(unittest.TestCase):
+    """The parent sits in a temporary directory other accounts can write to, so
+    whatever is already at its path may be someone else's. Each case must be
+    refused before the tool writes or deletes anything."""
+
+    @override
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = pathlib.Path(scratch.name)
+        self.parent = self.root / "work"
+        patch = mock.patch.object(workdir, "WORK_PARENT", self.parent)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def _refused(self) -> None:
+        with self.assertRaises(workdir.WorkdirUnsafe), workdir.private_workdir():
+            self.fail("a run started in an unsafe working directory")
+
+    def test_a_planted_symlink_is_refused_and_its_target_left_alone(self) -> None:
+        """Followed, the sweep would delete the `run-*` entries of whatever
+        directory of ours the link names."""
+        victim = self.root / "mine"
+        (victim / "run-keep").mkdir(parents=True)
+        (victim / "run-keep" / "data").write_text("kept", encoding="utf-8")
+        self.parent.symlink_to(victim)
+        self._refused()
+        self.assertEqual((victim / "run-keep" / "data").read_text(), "kept")
+        self.assertFalse((victim / "lock").exists())
+        self.assertEqual(victim.stat().st_mode & 0o777, 0o755 & ~_umask() & 0o777)
+
+    def test_a_directory_another_user_owns_is_refused(self) -> None:
+        """Our dumps would land somewhere its owner can read and rearrange."""
+        self.parent.mkdir(mode=0o700)
+        (self.parent / "run-theirs").mkdir()
+        with mock.patch("os.getuid", return_value=os.getuid() + 1):
+            self._refused()
+        self.assertTrue((self.parent / "run-theirs").exists())
+        self.assertFalse((self.parent / "lock").exists())
+
+    def test_a_directory_others_can_open_is_refused(self) -> None:
+        self.parent.mkdir()
+        self.parent.chmod(0o755)
+        self._refused()
+        self.assertFalse((self.parent / "lock").exists())
+
+    def test_a_file_at_the_path_is_refused(self) -> None:
+        self.parent.write_text("not a directory", encoding="utf-8")
+        self._refused()
+
+
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
 class InterruptingTest(unittest.TestCase):
     @override
     def setUp(self) -> None:

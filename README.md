@@ -190,7 +190,11 @@ private directory, `d1-copy` under the system temporary directory, which is
 removed on every exit the process can observe, a terminating signal included.
 A run that was killed outright leaves its directory behind, and the next run
 removes it before starting. A lock file there stops a second run from starting
-while one is under way.
+while one is under way. The tool creates `d1-copy` with mode 0700. If something
+is already at that path that is not such a directory of yours - a symlink, a
+file, or a directory another user owns or others can open - it refuses to run
+until you remove it, since another account on the machine may have put it
+there.
 
 ### Databases managed by cloudflare-deploy-toolkit
 
@@ -249,6 +253,11 @@ D1 applies none of a failed import.
 - **A held-back column is restored by primary key.** A row whose primary key
   holds NULL, which only a table that is neither STRICT nor WITHOUT ROWID
   allows, is not restored, and the comparison then fails.
+- **Indexes are created after every row is written.** A foreign key whose
+  parent key is unique only through a separate `CREATE UNIQUE INDEX`, rather
+  than a `UNIQUE` or `PRIMARY KEY` constraint in the table, then has no unique
+  parent key when its rows go in, and the import fails with
+  `foreign key mismatch`.
 
 ## License
 
