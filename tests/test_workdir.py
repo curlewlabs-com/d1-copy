@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import signal
 import tempfile
 import time
@@ -43,6 +44,44 @@ class WorkdirTest(unittest.TestCase):
             self.fail("the run went on past its signal")
         self.assertEqual(self._runs(), [])
         self.assertEqual(signal.getsignal(signal.SIGTERM), before)
+
+    def test_signals_during_the_removal_neither_stop_it_nor_are_lost(
+        self,
+    ) -> None:
+        """A run that finished and is already removing its files is interrupted
+        there - by a terminating signal, or by Ctrl-C - once or repeatedly.
+        Raised inside the removal, the interrupt would stop it part-way and
+        leave a copy of the database on disk."""
+        remove = shutil.rmtree
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                signalled: list[bool] = []
+
+                def interrupted_removal(
+                    *args: Any,
+                    signum: int = signum,
+                    signalled: list[bool] = signalled,
+                    **kwargs: Any,
+                ) -> None:
+                    if not signalled:
+                        signalled.append(True)
+                        for _ in range(2):
+                            os.kill(os.getpid(), signum)
+                            # The handler runs at the next bytecode boundary;
+                            # this gives it one before the removal goes on.
+                            time.sleep(0.2)
+                    remove(*args, **kwargs)
+
+                before = signal.getsignal(signum)
+                with (
+                    mock.patch("d1_copy.workdir.shutil.rmtree", interrupted_removal),
+                    self.assertRaises(KeyboardInterrupt),
+                    workdir.private_workdir() as directory,
+                ):
+                    (directory / "source.sql").write_text("rows", encoding="utf-8")
+                self.assertEqual(signalled, [True])
+                self.assertEqual(self._runs(), [])
+                self.assertEqual(signal.getsignal(signum), before)
 
     def test_the_directory_is_private_to_the_user(self) -> None:
         with workdir.private_workdir():
@@ -134,6 +173,13 @@ class InterruptingTest(unittest.TestCase):
         # Neither raises.
         self.interrupting.handle(signal.SIGHUP, None)
         self.interrupting.handle(signal.SIGTERM, None)
+
+    def test_a_signal_while_held_is_recorded_and_ends_the_run(self) -> None:
+        self.interrupting.hold()
+        # Does not raise.
+        self.interrupting.handle(signal.SIGTERM, None)
+        with self.assertRaises(KeyboardInterrupt):
+            self.interrupting.spend(None)
 
     def test_an_interrupt_python_discarded_is_delivered_again(self) -> None:
         """A raise inside a __del__ goes to sys.unraisablehook instead of

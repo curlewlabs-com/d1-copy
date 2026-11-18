@@ -192,7 +192,8 @@ Other behaviour of the D1 API that the client handles:
 
 Dumps and working databases are full copies of the source. They live in a
 private directory, `d1-copy` under the system temporary directory, which is
-removed on every exit the process can observe, a terminating signal included.
+removed on every exit the process can observe, a terminating signal or Ctrl-C
+included, and a signal that arrives during that removal waits until it is done.
 A run that was killed outright leaves its directory behind, and the next run
 removes it before starting. A lock file there stops a second run from starting
 while one is under way. The tool creates `d1-copy` with mode 0700. If something
@@ -244,9 +245,6 @@ D1 applies none of a failed import.
   there too, and can change that copy, on both sides alike. It also covers
   application tables only: a NUL in a table or index name recorded in
   `sqlite_sequence` or `sqlite_stat1` is left as the loader's placeholder.
-- **A terminating signal that arrives while a run is already removing its
-  working files stops the removal.** A later signal is held off once one has
-  arrived, but the first one is not. What is left is removed by the next run.
 - **A dump is executed by SQLite without restriction.** A restore file can
   `ATTACH` another local database file and change it. Restore only from an
   export you trust.
