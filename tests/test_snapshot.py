@@ -386,6 +386,31 @@ class ForeignKeyPlanTest(_Databases):
             'INSERT INTO "letters" ("id","writer") VALUES(1,1);\n'
         )
 
+    def test_names_alike_only_beyond_ascii_case_stay_apart(self) -> None:
+        """SQLite folds case for ASCII letters only, so `k` and the Kelvin sign
+        name different tables; folded together, this chain would read as a
+        cycle with no break and be refused."""
+        kelvin = "\u212a"
+        self.assert_copies_exactly(
+            f'CREATE TABLE "{kelvin}" (id INTEGER PRIMARY KEY, '
+            "a_id INTEGER NOT NULL REFERENCES a(id)) STRICT;\n"
+            "CREATE TABLE a (id INTEGER PRIMARY KEY, "
+            "k_id INTEGER NOT NULL REFERENCES k(id)) STRICT;\n"
+            "CREATE TABLE k (id INTEGER PRIMARY KEY) STRICT;\n"
+            'INSERT INTO "k" ("id") VALUES(1);\n'
+            'INSERT INTO "a" ("id","k_id") VALUES(1,1);\n'
+            f'INSERT INTO "{kelvin}" ("id","a_id") VALUES(1,1);\n'
+        )
+
+    def test_a_table_named_like_a_pragma_function_is_copied(self) -> None:
+        """An application table takes precedence over the table-valued function
+        of the same name, so the plan must not read SQLite's metadata through
+        one."""
+        self.assert_copies_exactly(
+            "CREATE TABLE pragma_table_list (k TEXT PRIMARY KEY, v TEXT);\n"
+            'INSERT INTO "pragma_table_list" ("k","v") VALUES(\'a\',\'b\');\n'
+        )
+
     def test_a_cycle_breaks_at_one_nullable_column_of_a_composite_key(
         self,
     ) -> None:

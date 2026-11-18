@@ -607,15 +607,16 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
 
     Read from foreign_key_list and table_info, SQLite's own account of the
     schema, never from the CREATE TABLE text. Table and column names in a
-    foreign key are matched as SQLite matches them, without regard to case.
+    foreign key are matched as SQLite matches them, without regard to the case
+    of ASCII letters (_folded).
     """
-    by_name = {table.casefold(): table for table in tables}
+    by_name = {_folded(table): table for table in tables}
     columns = {table: _table_columns(connection, table) for table in tables}
     keys = {table: _primary_key(connection, table) for table in tables}
 
     def resolved(table: str, name: str) -> str:
-        return {column.casefold(): column for column in columns[table]}.get(
-            name.casefold(), name
+        return {_folded(column): column for column in columns[table]}.get(
+            _folded(name), name
         )
 
     foreign: dict[str, list[_ForeignKey]] = {}
@@ -628,7 +629,7 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
         found = []
         for parts in grouped.values():
             parts.sort()
-            parent = by_name.get(parts[0][1].casefold())
+            parent = by_name.get(_folded(parts[0][1]))
             if parent is None:
                 continue
             named = [to for _, _, _, to in parts]
@@ -704,6 +705,15 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
     return _InsertPlan(ordered, deferred)
 
 
+# SQLite folds case in names for ASCII letters only: `K` and the Kelvin sign
+# are different tables to it, and must not be the same one here.
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _folded(name: str) -> str:
+    return name.translate(_ASCII_LOWER)
+
+
 def _table_columns(
     connection: sqlite3.Connection, table: str
 ) -> dict[str, tuple[bool, bool]]:
@@ -749,11 +759,10 @@ def _key_holds_no_null(
     )
     if len(key) == 1 and info[key[0]][0].upper() == "INTEGER" and not key_indexed:
         return True
-    listed = connection.execute(
-        "SELECT wr, strict FROM pragma_table_list WHERE schema = 'main' AND name = ?",
-        (table,),
-    ).fetchone()
-    return listed is not None and bool(listed[0] or listed[1])
+    # The PRAGMA itself, not the pragma_table_list table-valued function, which
+    # an application table of that name would shadow.
+    listed = connection.execute(f"PRAGMA main.table_list({_quoted(table)})").fetchone()
+    return listed is not None and bool(listed[4] or listed[5])
 
 
 def _literal(value: object, where: str) -> str:
