@@ -4,7 +4,7 @@ It replaces `urllib.request.urlopen`, so every line of the client and the
 command line runs as it does against Cloudflare. It reproduces what D1 does that
 this tool exists for: an export writes each table's rows right after its
 definition in catalog order, and writes each value as remote D1's export was
-measured to (_exported); an import runs with foreign keys enforced, applies
+measured to (exported); an import runs with foreign keys enforced, applies
 nothing when it fails, and stops silently at a raw NUL.
 """
 
@@ -212,12 +212,12 @@ def _inserts(connection: sqlite3.Connection, table: str) -> list[str]:
     ]
     names = ",".join(f'"{column}"' for column in columns)
     return [
-        f'INSERT INTO "{table}" ({names}) VALUES({",".join(_exported(v) for v in row)});'
+        f'INSERT INTO "{table}" ({names}) VALUES({",".join(exported(v) for v in row)});'
         for row in connection.execute(f'SELECT {names} FROM "{table}"')
     ]
 
 
-def _exported(value: object) -> str:
+def exported(value: object) -> str:
     """A value as remote D1's export writes one, as measured: a number as
     JavaScript prints it, and a line break inside text as an escape the value
     does not already hold, put back by replace()."""
