@@ -562,6 +562,16 @@ def _write_sequence_marks(
 
 
 @dataclasses.dataclass(frozen=True)
+class _ForeignKey:
+    """One foreign key, its columns resolved to the names the tables declare."""
+
+    parent: str
+    columns: tuple[str, ...]
+    # The parent's columns it points at, its primary key when none are named.
+    parent_columns: tuple[str, ...]
+
+
+@dataclasses.dataclass(frozen=True)
 class _InsertPlan:
     """The order tables' rows are written in, and what is held back to allow it."""
 
@@ -580,41 +590,89 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
     the file has to be valid one statement at a time.
 
     Ordering tables parents-first does that for everything but a cycle. A cycle
-    is broken at a NULLABLE referencing column: those columns are written as NULL
-    so their table can go first, and restored by UPDATE once every row exists.
-    Only a table that this frees completely is chosen, so nothing is deferred
-    that did not have to be. A cycle with no such column cannot be written in
-    any order and is refused.
+    is broken at foreign keys that can be written as NULL: for each such key to
+    a table still waiting, its nullable columns are written as NULL so their
+    table can go first, and restored by UPDATE once every row exists. One NULL
+    column is enough to satisfy a composite key, which SQLite checks only when
+    every column holds a value. Only a table that this frees completely is
+    chosen, so nothing is deferred that did not have to be. A cycle that leaves
+    no such table cannot be written in any order and is refused.
+
+    A column is never held back if it cannot be written as NULL and restored:
+    one in the primary key, one another foreign key points at (its children
+    would be written before it holds their parent key), or one in a table whose
+    primary key can itself hold NULL, since a restore is addressed by that key.
+
+    A self-reference orders nothing.
 
     Read from foreign_key_list and table_info, SQLite's own account of the
-    schema, never from the CREATE TABLE text. A self-reference orders nothing.
+    schema, never from the CREATE TABLE text. Table and column names in a
+    foreign key are matched as SQLite matches them, without regard to case.
     """
-    parents: dict[str, dict[str, set[str]]] = {}
-    nullable: dict[str, set[str]] = {}
-    for table in tables:
-        # Not NOT NULL, and not part of the primary key. table_info reports an
-        # INTEGER PRIMARY KEY as nullable, but a NULL written there is not an
-        # absent value: SQLite assigns the next rowid, which as a foreign key
-        # points at a parent nobody chose. A key column is never held back.
-        nullable[table] = {
-            str(row[1])
-            for row in connection.execute(f"PRAGMA table_info({_quoted(table)})")
-            if not row[3] and not row[5]
-        }
-        by_parent: dict[str, set[str]] = {}
-        for row in connection.execute(f"PRAGMA foreign_key_list({_quoted(table)})"):
-            parent, column = str(row[2]), str(row[3])
-            if parent != table and parent in tables:
-                by_parent.setdefault(parent, set()).add(column)
-        parents[table] = by_parent
+    by_name = {table.casefold(): table for table in tables}
+    columns = {table: _table_columns(connection, table) for table in tables}
+    keys = {table: _primary_key(connection, table) for table in tables}
 
-    ordered: list[str] = []
+    def resolved(table: str, name: str) -> str:
+        return {column.casefold(): column for column in columns[table]}.get(
+            name.casefold(), name
+        )
+
+    foreign: dict[str, list[_ForeignKey]] = {}
+    for table in tables:
+        grouped: dict[int, list[tuple[int, str, str, str | None]]] = {}
+        for row in connection.execute(f"PRAGMA foreign_key_list({_quoted(table)})"):
+            grouped.setdefault(int(row[0]), []).append(
+                (int(row[1]), str(row[2]), str(row[3]), row[4])
+            )
+        found = []
+        for parts in grouped.values():
+            parts.sort()
+            parent = by_name.get(parts[0][1].casefold())
+            if parent is None:
+                continue
+            named = [to for _, _, _, to in parts]
+            found.append(
+                _ForeignKey(
+                    parent,
+                    tuple(resolved(table, column) for _, _, column, _ in parts),
+                    tuple(keys[parent])
+                    if any(to is None for to in named)
+                    else tuple(resolved(parent, str(to)) for to in named),
+                )
+            )
+        foreign[table] = found
+
+    referenced = {
+        (key.parent, column)
+        for keys_of in foreign.values()
+        for key in keys_of
+        for column in key.parent_columns
+    }
+    holdable = {
+        table: {
+            name
+            for name, (not_null, in_key) in columns[table].items()
+            if not not_null and not in_key and (table, name) not in referenced
+        }
+        if _key_holds_no_null(connection, table, keys[table])
+        else set()
+        for table in tables
+    }
+
     deferred: dict[str, list[str]] = {}
+    ordered: list[str] = []
     waiting = set(tables)
     while waiting:
-        ready = sorted(
-            table for table in waiting if not (parents[table].keys() & waiting)
-        )
+
+        def blocking(table: str) -> list[_ForeignKey]:
+            return [
+                key
+                for key in foreign[table]
+                if key.parent != table and key.parent in waiting
+            ]
+
+        ready = sorted(table for table in waiting if not blocking(table))
         if ready:
             ordered.extend(ready)
             waiting.difference_update(ready)
@@ -623,28 +681,79 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
             (
                 table
                 for table in sorted(waiting)
-                if all(
-                    columns <= nullable[table]
-                    for parent, columns in parents[table].items()
-                    if parent in waiting
-                )
+                if all(set(key.columns) & holdable[table] for key in blocking(table))
             ),
             None,
         )
         if freed is None:
             raise SnapshotError(
-                "foreign keys form a cycle with no nullable column to break it at: "
+                "foreign keys form a cycle with no column that can be written as "
+                "NULL and restored - a nullable column no foreign key points at, "
+                "in a table whose primary key cannot hold NULL: "
                 + ", ".join(sorted(waiting))
             )
-        deferred[freed] = sorted(
+        held = {
             column
-            for parent, columns in parents[freed].items()
-            if parent in waiting
-            for column in columns
-        )
+            for key in blocking(freed)
+            for column in set(key.columns) & holdable[freed]
+        }
+        deferred[freed] = sorted({*deferred.get(freed, []), *held})
         ordered.append(freed)
         waiting.discard(freed)
+
     return _InsertPlan(ordered, deferred)
+
+
+def _table_columns(
+    connection: sqlite3.Connection, table: str
+) -> dict[str, tuple[bool, bool]]:
+    """Each column as (declared NOT NULL, part of the primary key)."""
+    return {
+        str(row[1]): (bool(row[3]), bool(row[5]))
+        for row in connection.execute(f"PRAGMA table_info({_quoted(table)})")
+    }
+
+
+def _primary_key(connection: sqlite3.Connection, table: str) -> list[str]:
+    rows = [
+        row
+        for row in connection.execute(f"PRAGMA table_info({_quoted(table)})")
+        if row[5]
+    ]
+    return [str(row[1]) for row in sorted(rows, key=lambda row: int(row[5]))]
+
+
+def _key_holds_no_null(
+    connection: sqlite3.Connection, table: str, key: list[str]
+) -> bool:
+    """Whether `table` has a primary key no row can hold NULL in.
+
+    A restore is addressed by that key. SQLite lets a primary key column of an
+    ordinary rowid table hold NULL unless it is declared NOT NULL; a STRICT or
+    WITHOUT ROWID table does not, and neither does a rowid alias - a lone
+    INTEGER PRIMARY KEY, which SQLite gives no index of its own (one declared
+    DESC is not an alias, gets an index, and can hold NULL). table_info reports
+    none of those as NOT NULL, so each is asked for.
+    """
+    if not key:
+        return False
+    info = {
+        str(row[1]): (str(row[2]), bool(row[3]))
+        for row in connection.execute(f"PRAGMA table_info({_quoted(table)})")
+    }
+    if all(info[column][1] for column in key):
+        return True
+    key_indexed = any(
+        row[3] == "pk"
+        for row in connection.execute(f"PRAGMA index_list({_quoted(table)})")
+    )
+    if len(key) == 1 and info[key[0]][0].upper() == "INTEGER" and not key_indexed:
+        return True
+    listed = connection.execute(
+        "SELECT wr, strict FROM pragma_table_list WHERE schema = 'main' AND name = ?",
+        (table,),
+    ).fetchone()
+    return listed is not None and bool(listed[0] or listed[1])
 
 
 def _literal(value: object, where: str) -> str:
