@@ -263,7 +263,7 @@ def _real_valued_columns(connection: sqlite3.Connection, table: str) -> list[str
     """
     quoted = table.replace('"', '""')
     columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{quoted}")')]
-    found = []
+    found: list[str] = []
     for column in columns:
         name = column.replace('"', '""')
         hit = connection.execute(
@@ -275,7 +275,7 @@ def _real_valued_columns(connection: sqlite3.Connection, table: str) -> list[str
 
 
 def _health(connection: sqlite3.Connection, side: str) -> list[Difference]:
-    problems = []
+    problems: list[Difference] = []
     integrity = [row[0] for row in connection.execute("PRAGMA integrity_check")]
     if integrity != ["ok"]:
         problems.append(
@@ -413,7 +413,7 @@ def unexportable_sql(table: str, columns: list[str]) -> str:
     of a column of another. An integer is compared on each side rather than with
     abs(), which raises on the most negative int64 instead of answering.
     """
-    probes = []
+    probes: list[str] = []
     for index, column in enumerate(columns):
         name = _quoted(column)
         beyond = f"{name} > {EXPORT_SAFE_INTEGER} OR {name} < -{EXPORT_SAFE_INTEGER}"
@@ -455,7 +455,7 @@ def values_an_export_would_change(database: pathlib.Path) -> list[str]:
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
     try:
-        found = []
+        found: list[str] = []
         tables = [*application_tables(connection)]
         tables += [t for t in _SQLITE_TABLES_COMPARED if _has_table(connection, t)]
         for table in tables:
@@ -677,7 +677,7 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
             grouped.setdefault(int(row[0]), []).append(
                 (int(row[1]), str(row[2]), str(row[3]), row[4])
             )
-        found = []
+        found: list[_ForeignKey] = []
         for parts in grouped.values():
             parts.sort()
             parent = by_name.get(_folded(parts[0][1]))
@@ -701,7 +701,7 @@ def _insert_plan(connection: sqlite3.Connection, tables: list[str]) -> _InsertPl
         for key in keys_of
         for column in key.parent_columns
     }
-    holdable = {
+    holdable: dict[str, set[str]] = {
         table: {
             name
             for name, (not_null, in_key) in columns[table].items()
