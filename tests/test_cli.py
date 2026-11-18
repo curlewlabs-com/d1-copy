@@ -126,9 +126,60 @@ class CommandTest(unittest.TestCase):
             "copy", "--source", "source", "--target", "target"
         )
         self.assertEqual(status, 2, output)
-        self.assertIn("beyond 2^53 in authors", output)
+        self.assertIn("authors.id holds an integer beyond 2^53", output)
         self.assertFalse(any("/export" in path for path in self.api.paths("POST")))
         self.assertEqual(snapshot_tables(target), [])
+
+    def test_values_an_export_rewrites_are_refused_before_export(self) -> None:
+        """Each of these leaves the export changed, and both sides' exports
+        agree on the change: so the copy would verify while differing from the
+        live source. The refusal names the column, never the value."""
+        cases = {
+            # Written as `1`, it reads back into a column of no type as an INTEGER.
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, v); "
+            "INSERT INTO notes VALUES (1, 1.0);": "notes.v holds a REAL value",
+            # The literal backslash-n comes back as a second newline.
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, v TEXT) STRICT; "
+            "INSERT INTO notes VALUES (1, 'never-print-this\\n' || char(10));": (
+                "notes.v holds text holding both a newline and a literal \\n"
+            ),
+        }
+        for index, (sql, expected) in enumerate(cases.items()):
+            with self.subTest(expected=expected):
+                self.api.create(f"source-{index}", sql)
+                self.api.create(f"target-{index}")
+                self.api.requests.clear()
+                status, output = self.run_command(
+                    "copy", "--source", f"source-{index}", "--target", f"target-{index}"
+                )
+                self.assertEqual(status, 2, output)
+                self.assertIn(expected, output)
+                self.assertNotIn("never-print-this", output)
+                self.assertFalse(
+                    any("/export" in path for path in self.api.paths("POST"))
+                )
+
+    def test_a_table_name_shaped_like_a_wildcard_is_still_checked(self) -> None:
+        """`_` matches any character in LIKE, so a filter written as
+        `NOT LIKE '_cf_%'` would skip a table named `xcf_y` - past both the
+        empty-target check and the check of what an export would change."""
+        self.api.create(
+            "source",
+            "CREATE TABLE xcf_y (id INTEGER PRIMARY KEY, n INTEGER); "
+            "INSERT INTO xcf_y VALUES (1, 9007199254740993);",
+        )
+        self.api.create("target", "CREATE TABLE xcf_y (id INTEGER PRIMARY KEY);")
+        self.api.create("empty")
+        status, output = self.run_command(
+            "copy", "--source", "source", "--target", "target"
+        )
+        self.assertEqual(status, 2, output)
+        self.assertIn("already holds 1 application table", output)
+        status, output = self.run_command(
+            "copy", "--source", "source", "--target", "empty"
+        )
+        self.assertEqual(status, 2, output)
+        self.assertIn("xcf_y.n holds an integer beyond 2^53", output)
 
     def test_verify_cannot_be_fooled_by_a_value_the_exports_round_alike(self) -> None:
         """2^53 + 1 and 2^53 export as the same number. A verify that trusted the
@@ -143,7 +194,7 @@ class CommandTest(unittest.TestCase):
             "verify", "--source", "source", "--target", "target"
         )
         self.assertEqual(status, 2, output)
-        self.assertIn("beyond 2^53", output)
+        self.assertIn("authors.id holds an integer beyond 2^53", output)
 
     def test_verify_reports_a_difference_by_table_and_count(self) -> None:
         self.api.create("source", SOURCE)
@@ -195,7 +246,7 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(self.run_command("check", "--source", "clean")[0], 0)
         status, output = self.run_command("check", "--source", "big")
         self.assertEqual(status, 1, output)
-        self.assertIn("beyond 2^53, which an export changes, in: authors", output)
+        self.assertIn("- authors.id holds an integer beyond 2^53", output)
 
     def test_a_managed_databases_copy_arrives_locked_and_compares_exact(self) -> None:
         """cloudflare-deploy-toolkit's Worker refuses requests while the lock is

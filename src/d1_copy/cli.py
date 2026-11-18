@@ -37,11 +37,13 @@ WHAT IT REFUSES, each before anything is written:
   - a target that already holds application tables. A copy is only ever made
     into an empty database, and nothing here drops or deletes what a database
     already held;
-  - a source holding an integer beyond 2^53. D1 exports integers through a
-    double, so the copy would change it and the comparison, made between
-    exports, could not tell (snapshot.py);
-  - a source holding a REAL value, or foreign keys that form a cycle with no
-    nullable column to break it at (snapshot.py).
+  - a source holding a value an export would change: an integer beyond 2^53,
+    a REAL, or text holding both a newline and a literal backslash-n (or a
+    carriage return and a literal backslash-r). The copy would change it and
+    the comparison, made between exports, could not tell (snapshot.py's
+    UNEXPORTABLE);
+  - foreign keys that form a cycle with no nullable column to break it at
+    (snapshot.py).
 
 Credentials: CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_API_TOKEN with D1 Edit on the
 account (an export is write-classed). Neither is ever printed.
@@ -64,7 +66,7 @@ from .workdir import WorkdirInUse, private_workdir
 
 _TABLES_SQL = (
     "SELECT name FROM sqlite_schema WHERE type = 'table' "
-    "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name"
+    "AND name NOT GLOB 'sqlite_*' AND name NOT GLOB '_cf_*' ORDER BY name"
 )
 
 
@@ -95,10 +97,10 @@ def _application_tables(client: rest.D1Client, database: rest.Database) -> list[
     return [str(row["name"]) for row in result.rows]
 
 
-def _tables_an_export_would_change(
+def _values_an_export_would_change(
     client: rest.D1Client, source: rest.Database
 ) -> list[str]:
-    """Tables of the LIVE source holding an integer an export cannot carry.
+    """Columns of the LIVE source holding a value an export cannot carry.
 
     Asked of the live database because nothing downstream of an export can
     answer it. One bounded scan per table, on the primary, so it reads about as
@@ -123,7 +125,7 @@ def _tables_an_export_would_change(
     ]
     answers = client.query_many(
         source.uuid,
-        [snapshot.unsafe_integer_sql(table, columns) for table, columns in probes],
+        [snapshot.unexportable_sql(table, columns) for table, columns in probes],
         mutates=False,
     )
     rows_read = sum(
@@ -131,32 +133,34 @@ def _tables_an_export_would_change(
     )
     _say(f"{source}: live check read {rows_read} row(s)")
     return [
-        table for (table, _), answer in zip(probes, answers, strict=True) if answer.rows
+        found
+        for (table, columns), answer in zip(probes, answers, strict=True)
+        for found in snapshot.unexportable_values(
+            table, columns, answer.rows[0] if answer.rows else {}
+        )
     ]
 
 
 def _refuse_what_an_export_cannot_carry(
     client: rest.D1Client, source: rest.Database
 ) -> None:
-    tables = _tables_an_export_would_change(client, source)
-    if tables:
+    found = _values_an_export_would_change(client, source)
+    if found:
         raise Refusal(
-            f"{source} holds an integer beyond 2^53 in {', '.join(tables)}; D1 exports "
-            "integers through a double, so an export would change it and no "
-            "comparison of exports could tell"
+            f"{source} holds what an export would change, so no comparison of "
+            f"exports could tell: {'; '.join(found)}"
         )
 
 
 def _refuse_a_source_a_copy_cannot_vouch_for(source_db: pathlib.Path) -> None:
-    unsafe = snapshot.tables_with_unsafe_integers(source_db)
-    if unsafe:
+    found = snapshot.values_an_export_would_change(source_db)
+    if found:
         # For a dump file this is the only place the question can be asked. For
         # a live source it backs up the check made before the export: a value an
         # export rounded is usually still beyond 2^53, so it shows here too.
         raise Refusal(
-            f"the source holds an integer beyond 2^53 in {', '.join(unsafe)}; the "
-            "target is read back through an export, which would change it, so the "
-            "copy could not be confirmed"
+            "the target is read back through an export, which would change what "
+            f"the source holds, so the copy could not be confirmed: {'; '.join(found)}"
         )
 
 
@@ -339,13 +343,13 @@ def verify(client: rest.D1Client, args: argparse.Namespace) -> int:
 def check(client: rest.D1Client, args: argparse.Namespace) -> int:
     source = client.resolve(args.source)
     _say(f"source: {source}")
-    tables = _tables_an_export_would_change(client, source)
-    if tables:
-        _say(
-            f"[FAIL] integers beyond 2^53, which an export changes, in: {', '.join(tables)}"
-        )
+    found = _values_an_export_would_change(client, source)
+    if found:
+        _say(f"[FAIL] an export would change {len(found)} column(s):")
+        for each in found:
+            _say(f"  - {each}")
         return 1
-    _say("[OK] every integer is one an export carries exactly")
+    _say("[OK] every value is one an export carries exactly")
     return 0
 
 

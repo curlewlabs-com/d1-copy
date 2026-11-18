@@ -10,8 +10,9 @@ ingesting an import are not: neither takes an idempotency key, so a retry after
 Cloudflare already accepted the first attempt would run the operation twice, and
 a transient failure there has to surface.
 
-The token is sent only as a header and never printed. Response bodies are never
-echoed either: a query result is the database's data.
+The token is sent only as a header and never printed. A response body is never
+echoed whole, since a query result is the database's data; only Cloudflare's own
+error messages are, and an SQL error among them can quote part of a statement.
 """
 
 from __future__ import annotations

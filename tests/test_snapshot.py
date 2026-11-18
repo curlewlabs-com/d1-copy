@@ -434,39 +434,45 @@ class RefusedBeforeWritingTest(_Databases):
             snapshot.write_import_sql(source, self.root / "import.sql")
 
 
-class UnsafeIntegerTest(unittest.TestCase):
-    """D1 holds a 64-bit integer exactly and exports it through a double.
+class UnexportableValueTest(unittest.TestCase):
+    """The values an export does not carry exactly, asked of a live database.
 
-    2^53 + 1 leaves an export as 2^53, still written as an integer. The source's
-    export and the target's then agree on the wrong number, so this cannot be
-    caught by comparing them. It is caught by asking the live source first, and
-    this is the question that gets asked.
+    The source's export and the target's would agree on each changed value, so
+    none of these can be caught by comparing them. They are caught by asking
+    the live source first, and this is the question that gets asked.
     """
 
-    def _found(self, *values: object) -> bool:
+    def _found(self, *values: object) -> list[str]:
         connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
         try:
-            # Not STRICT, so that an integer can sit in a TEXT column the way
-            # only a STRICT table prevents.
-            connection.execute(
-                "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, s TEXT)"
-            )
+            # Not STRICT, and `v` has no declared type, so a value of any
+            # storage class can sit in it the way only a STRICT table prevents.
+            connection.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v)")
             connection.executemany(
-                "INSERT INTO t (n, s) VALUES (?, ?)", [(v, None) for v in values]
+                "INSERT INTO t (v) VALUES (?)", [(value,) for value in values]
             )
-            sql = snapshot.unsafe_integer_sql("t", ["id", "n", "s"])
-            return connection.execute(sql).fetchone() is not None
+            answer = connection.execute(
+                snapshot.unexportable_sql("t", ["id", "v"])
+            ).fetchone()
+            return snapshot.unexportable_values("t", ["id", "v"], dict(answer))
         finally:
             connection.close()
 
-    def test_every_integer_a_double_holds_exactly_is_accepted(self) -> None:
+    def test_every_value_an_export_carries_exactly_is_accepted(self) -> None:
         limit = snapshot.EXPORT_SAFE_INTEGER
-        self.assertFalse(self._found(0, 42, 1789000000000, limit, -limit, None))
+        self.assertEqual(
+            self._found(
+                0, limit, -limit, None, b"\x00\n", "a\nb", "a\\nb", "a\r\nb", "a\\rb"
+            ),
+            [],
+        )
 
-    def test_the_first_integer_beyond_it_is_found_in_either_direction(self) -> None:
+    def test_the_first_integer_beyond_2_53_is_found_in_either_direction(self) -> None:
+        """2^53 + 1 leaves an export as 2^53."""
         limit = snapshot.EXPORT_SAFE_INTEGER
-        self.assertTrue(self._found(limit + 1))
-        self.assertTrue(self._found(-limit - 1))
+        self.assertEqual(self._found(limit + 1), ["t.v holds an integer beyond 2^53"])
+        self.assertEqual(self._found(-limit - 1), ["t.v holds an integer beyond 2^53"])
 
     def test_the_most_negative_int64_is_found_rather_than_raising(self) -> None:
         """abs() of it overflows and SQLite raises instead of answering, which
@@ -474,18 +480,30 @@ class UnsafeIntegerTest(unittest.TestCase):
         self.assertTrue(self._found(-(2**63)))
         self.assertTrue(self._found(2**63 - 1))
 
-    def test_an_integer_hiding_in_a_text_column_is_found(self) -> None:
-        connection = sqlite3.connect(":memory:")
-        try:
-            connection.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, s BLOB)")
-            connection.execute("INSERT INTO t (s) VALUES (?)", (2**60,))
-            sql = snapshot.unsafe_integer_sql("t", ["id", "s"])
-            self.assertIsNotNone(connection.execute(sql).fetchone())
-        finally:
-            connection.close()
+    def test_a_whole_number_real_is_found(self) -> None:
+        """Written as `1`, it reads back into a column of no declared type as
+        the INTEGER 1, and both exports agree on the INTEGER."""
+        self.assertEqual(self._found(1.0), ["t.v holds a REAL value"])
+
+    def test_text_with_a_newline_and_a_literal_backslash_n_is_found(self) -> None:
+        """The export turns the literal into a second newline, on both sides."""
+        self.assertEqual(
+            self._found("a\\nb\nc"),
+            [f"t.v holds {snapshot.UNEXPORTABLE['n']}"],
+        )
+
+    def test_text_with_a_carriage_return_and_a_literal_backslash_r_is_found(
+        self,
+    ) -> None:
+        self.assertTrue(self._found("a\\rb\rc"))
+
+    def test_the_finding_names_the_column_and_never_the_value(self) -> None:
+        found = "".join(self._found("never-print-this\\n\n"))
+        self.assertIn("t.v", found)
+        self.assertNotIn("never-print-this", found)
 
 
-class UnsafeIntegerInADumpTest(_Databases):
+class UnexportableValueInADumpTest(_Databases):
     """A dump file has no live origin to ask, so it is judged once loaded.
 
     A dump holding such a value imports exactly. What cannot happen is
@@ -494,17 +512,19 @@ class UnsafeIntegerInADumpTest(_Databases):
     a value that rounds to itself on each side - as exact when nobody checked.
     """
 
-    def _tables(self, rows: str) -> list[str]:
-        return snapshot.tables_with_unsafe_integers(self.database(SCHEMA + rows))
+    def _found(self, rows: str) -> list[str]:
+        return snapshot.values_an_export_would_change(self.database(SCHEMA + rows))
 
-    def test_a_dump_of_ordinary_values_names_no_table(self) -> None:
-        self.assertEqual(self._tables(ROWS), [])
+    def test_a_dump_of_ordinary_values_names_nothing(self) -> None:
+        self.assertEqual(self._found(ROWS), [])
 
-    def test_the_table_holding_one_is_named_and_no_other(self) -> None:
+    def test_the_column_holding_one_is_named_and_no_other(self) -> None:
         beyond = ROWS.replace(
             "VALUES(1,'a',100)", f"VALUES(1,'a',{snapshot.EXPORT_SAFE_INTEGER + 1})"
         )
-        self.assertEqual(self._tables(beyond), ["authors"])
+        self.assertEqual(
+            self._found(beyond), ["authors.joined_at holds an integer beyond 2^53"]
+        )
 
     def test_a_sequence_mark_beyond_it_is_found_too(self) -> None:
         """sqlite_sequence is copied like any table and read back the same way."""
@@ -512,7 +532,9 @@ class UnsafeIntegerInADumpTest(_Databases):
             "VALUES('authors',2)",
             f"VALUES('authors',{snapshot.EXPORT_SAFE_INTEGER + 1})",
         )
-        self.assertEqual(self._tables(beyond), ["sqlite_sequence"])
+        self.assertEqual(
+            self._found(beyond), ["sqlite_sequence.seq holds an integer beyond 2^53"]
+        )
 
 
 # Indexes the planner ranks one way with no statistics and the other way with

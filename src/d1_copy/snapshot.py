@@ -27,14 +27,12 @@ has an implicit rowid that a dump does not carry, so an import assigns fresh one
 NOTHING HERE PRINTS A ROW. A difference reports a table and counts, never
 values: the working databases are full copies of whatever the database holds.
 
-WHAT AN EXPORT CANNOT CARRY, AND WHY THAT IS CHECKED ELSEWHERE. D1 holds a 64-bit
-integer exactly and exports it through a double: 2^53 + 1 leaves as 2^53 and the
-largest int64 leaves rounded, each still written as an integer. Nothing here can
-see that. The source's export and the target's carry the same wrong number and
-agree, and the local SQLite, which is exact, faithfully compares what it was
-given. So the check is made against the live source, before it is exported
-(unsafe_integer_sql below, run by the command line), and a copy of a source that
-holds such a value is refused.
+WHAT AN EXPORT CANNOT CARRY, AND WHY THAT IS CHECKED ELSEWHERE. Some values
+leave an export changed, and the source's export and the target's then carry the
+same changed value and agree: the local SQLite, which is exact, faithfully
+compares what it was given. So the check is made against the live source, before
+it is exported (unexportable_sql below, run by the command line), and a copy of a
+source that holds such a value is refused. UNEXPORTABLE says which values and why.
 
 WHY A DUMP IS NEVER IMPORTED AS IT ARRIVED. D1 refuses its own export. An export
 writes each table's rows directly after that table's definition, in catalog
@@ -181,7 +179,7 @@ def _schema(connection: sqlite3.Connection) -> list[tuple[str, str, str, str]]:
     # compared as a second copy of the same fact.
     rows = connection.execute(
         "SELECT type, name, tbl_name, sql FROM sqlite_schema "
-        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        "WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name"
     ).fetchall()
     return [
         (kind, name, table, sql)
@@ -338,33 +336,78 @@ def _compare(
 EXPORT_SAFE_INTEGER = 2**53
 
 
-def unsafe_integer_sql(table: str, columns: list[str]) -> str:
-    """SQL answering whether `table` holds an integer an export would change.
+# Each kind of value an export does not carry exactly, by the letter its probe
+# column is named with in unexportable_sql.
+#
+#   i - D1 holds a 64-bit integer exactly and exports it through a double:
+#       2^53 + 1 leaves as 2^53, still written as an integer.
+#   r - an export writes a REAL as decimal text, which need not read back as the
+#       same double, and Cloudflare's export source writes a whole-number REAL
+#       without its decimal point, so 1.0 in a column of no declared type reads
+#       back as the INTEGER 1.
+#   n - Cloudflare's export source writes a real newline inside text as the two
+#       characters backslash and n, and wraps the literal in a replace() that
+#       turns every such pair back into a newline, so a literal backslash-n in
+#       the same value becomes a newline too; a carriage return and backslash-r
+#       go the same way.
+UNEXPORTABLE = {
+    "i": "an integer beyond 2^53",
+    "r": "a REAL value",
+    "n": "text holding both a newline and a literal \\n, or both a carriage "
+    "return and a literal \\r",
+}
 
-    A row comes back if any column holds an integer beyond EXPORT_SAFE_INTEGER
-    in either direction. Every column is tested, whatever type it declares,
-    because only a STRICT table keeps an integer out of a TEXT column. Written as
-    a comparison on each side rather than with abs(), which raises on the most
-    negative int64 instead of answering.
+
+def unexportable_sql(table: str, columns: list[str]) -> str:
+    """SQL answering, per column of `table`, whether it holds a value an export
+    would change. See UNEXPORTABLE.
+
+    One scan of the table, whatever the number of columns, so the check reads
+    each row once. The answer is one row whose column `<letter><index>` is 1
+    where column `index` holds such a value. Every column is tested, whatever
+    type it declares, because only a STRICT table keeps a value of one type out
+    of a column of another. An integer is compared on each side rather than with
+    abs(), which raises on the most negative int64 instead of answering.
     """
-    tests = " OR ".join(
-        f"(typeof({_quoted(column)}) = 'integer' AND ({_quoted(column)} > "
-        f"{EXPORT_SAFE_INTEGER} OR {_quoted(column)} < -{EXPORT_SAFE_INTEGER}))"
-        for column in columns
-    )
-    return f"SELECT 1 AS found FROM {_quoted(table)} WHERE {tests} LIMIT 1"
+    probes = []
+    for index, column in enumerate(columns):
+        name = _quoted(column)
+        beyond = f"{name} > {EXPORT_SAFE_INTEGER} OR {name} < -{EXPORT_SAFE_INTEGER}"
+        newline = f"instr({name}, char(10)) > 0 AND instr({name}, '\\n') > 0"
+        carriage = f"instr({name}, char(13)) > 0 AND instr({name}, '\\r') > 0"
+        rewritten = f"({newline}) OR ({carriage})"
+        probes += [
+            f"max(typeof({name}) = 'integer' AND ({beyond})) AS \"i{index}\"",
+            f"max(typeof({name}) = 'real') AS \"r{index}\"",
+            f"max(typeof({name}) = 'text' AND ({rewritten})) AS \"n{index}\"",
+        ]
+    return f"SELECT {', '.join(probes)} FROM {_quoted(table)}"
 
 
-def tables_with_unsafe_integers(database: pathlib.Path) -> list[str]:
-    """Tables of a LOADED database holding an integer an export would change.
+def unexportable_values(
+    table: str, columns: list[str], answer: typing.Mapping[str, object]
+) -> list[str]:
+    """What unexportable_sql's `answer` found, as `table.column holds ...`. Names
+    the column and the kind of value, never the value."""
+    return [
+        f"{table}.{column} holds {reason}"
+        for index, column in enumerate(columns)
+        for letter, reason in UNEXPORTABLE.items()
+        if answer.get(f"{letter}{index}") == 1
+    ]
 
-    The same question unsafe_integer_sql asks of a live database, asked of a
-    local one. It is how a dump file is judged, since a file has no live origin
-    to ask: a dump holding such a value can be imported exactly, but the target
-    is then read back through an export, which would change it, so the copy
-    could never be confirmed.
+
+def values_an_export_would_change(database: pathlib.Path) -> list[str]:
+    """unexportable_values for every table of a LOADED database.
+
+    The same question unexportable_sql asks of a live database, asked of a local
+    one. It is how a dump file is judged, since a file has no live origin to
+    ask: a dump holding such a value can be imported exactly, but the target is
+    then read back through an export, which would change it, so the copy could
+    never be confirmed.
     """
     connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
     try:
         found = []
         tables = [*application_tables(connection)]
@@ -375,8 +418,8 @@ def tables_with_unsafe_integers(database: pathlib.Path) -> list[str]:
                 str(row[1])
                 for row in connection.execute(f"PRAGMA table_info({_quoted(table)})")
             ]
-            if connection.execute(unsafe_integer_sql(table, columns)).fetchone():
-                found.append(table)
+            answer = connection.execute(unexportable_sql(table, columns)).fetchone()
+            found += unexportable_values(table, columns, dict(answer))
         return found
     finally:
         connection.close()
@@ -464,7 +507,7 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
             # the export loaded.
             others = connection.execute(
                 "SELECT sql FROM sqlite_schema WHERE type != 'table' AND sql IS NOT NULL "
-                "AND name NOT LIKE 'sqlite_%' ORDER BY rowid"
+                "AND name NOT GLOB 'sqlite_*' ORDER BY rowid"
             ).fetchall()
             for (definition,) in others:
                 out.write(f"{definition};\n")

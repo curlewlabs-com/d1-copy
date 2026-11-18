@@ -1,15 +1,17 @@
 """A stand-in for the D1 REST API at the HTTP edge, backed by local SQLite files.
 
 It replaces `urllib.request.urlopen`, so every line of the client and the
-command line runs as it does against Cloudflare. It reproduces the two
-behaviours of D1 this tool exists for: an export writes each table's rows right
-after its definition in catalog order, and passes integers through a double; an
-import runs with foreign keys enforced and applies nothing when it fails.
+command line runs as it does against Cloudflare. It reproduces what D1 does that
+this tool exists for: an export writes each table's rows right after its
+definition in catalog order, and writes each value as Cloudflare's export source
+does (_exported); an import runs with foreign keys enforced and applies nothing
+when it fails.
 """
 
 from __future__ import annotations
 
 import contextlib
+import decimal
 import email.message
 import io
 import json
@@ -151,7 +153,7 @@ class FakeD1:
             out = ["PRAGMA defer_foreign_keys=TRUE;"]
             catalog = connection.execute(
                 "SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL "
-                "AND name NOT LIKE 'sqlite_%' ORDER BY rowid"
+                "AND name NOT GLOB 'sqlite_*' ORDER BY rowid"
             ).fetchall()
             for kind, name, sql in catalog:
                 if kind == "table":
@@ -210,16 +212,31 @@ def _inserts(connection: sqlite3.Connection, table: str) -> list[str]:
 
 
 def _exported(value: object) -> str:
+    """A value as Cloudflare's export source writes one (dumpSql.ts at
+    https://github.com/cloudflare/workers-sdk/blob/e35c4a154ea16a96b47cb2e68a4930c1d833e81d/packages/miniflare/src/workers/d1/dumpSql.ts):
+    a number as JavaScript prints it, and text with its line breaks escaped."""
     if value is None:
         return "NULL"
-    if isinstance(value, int):
-        # Through a double, as D1's export does.
-        return str(int(float(value)))
+    if isinstance(value, (int, float)):
+        return _javascript_number(float(value))
     if isinstance(value, bytes):
         return f"X'{value.hex()}'"
-    if isinstance(value, float):
-        return repr(value)
-    return "'" + str(value).replace("'", "''") + "'"
+    text = str(value)
+    escaped = text.replace("'", "''").replace("\n", "\\n").replace("\r", "\\r")
+    literal = f"'{escaped}'"
+    if "\r" in text:
+        literal = f"replace({literal},'\\r',char(13))"
+    if "\n" in text:
+        literal = f"replace({literal},'\\n',char(10))"
+    return literal
+
+
+def _javascript_number(number: float) -> str:
+    """What String(number) gives: a whole number with no decimal point, and the
+    shortest digits that read back as the same double."""
+    if number.is_integer() and abs(number) < 1e21:
+        return str(int(decimal.Decimal(repr(number))))
+    return repr(number)
 
 
 class _Response:

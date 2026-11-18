@@ -32,7 +32,9 @@ stand-in for the D1 API (`tests/fake_d1.py`).
   the same pull request. A test that guards a failure mode says which one.
 - **Fail loudly.** A comparison that cannot be trusted is a non-zero exit,
   never a pass.
-- **Never print a row.** Differences name a table and give counts.
+- **Never print a row value in the tool's own messages.** Differences name a
+  table and give counts, and refusals name a table and column. An error D1 or
+  SQLite reports is passed on as it is, and the README says it can quote one.
 - **Standard library only at runtime.**
 - **Pin dependencies exactly.** An action reference is its release's commit
   SHA with the version beside it, since a tag can be moved. The tools in

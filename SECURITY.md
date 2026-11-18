@@ -19,9 +19,10 @@ API, with the token it is given. The security surface is:
 - **The data it copies.** Exports and the working databases built from them are
   full copies of the source. They are kept in a directory readable only by the
   user running the tool, removed on every exit the process can observe, and
-  removed by the next run if a run was killed. Output names tables and counts,
-  never row values, and error text from D1 is cut short because a syntax error
-  can quote part of a row.
+  removed by the next run if a run was killed. The tool's own messages name
+  tables, columns and counts, never row values. An error D1 or SQLite reports
+  is passed on: D1's is cut short, and a syntax error's text can still quote
+  part of a row.
 - **The target.** The tool writes only to a target that holds no table, and D1
   applies nothing of a failed import. A sequence that changes a database that
   already held data is a defect in what the tool promises. Report it as a bug,
