@@ -753,6 +753,21 @@ class IndexOrderTest(_Databases):
 
 
 class LoadDumpTest(_Databases):
+    def test_a_dump_that_attaches_another_file_is_refused_and_writes_nothing(
+        self,
+    ) -> None:
+        """A restore file is SQL, and SQL can reach another database file on
+        the machine. A D1 export never does, so one that tries is not run."""
+        elsewhere = self.root / "elsewhere.db"
+        connection = sqlite3.connect(elsewhere)
+        connection.execute("CREATE TABLE kept (v)")
+        connection.close()
+        before = elsewhere.read_bytes()
+        attaching = f"ATTACH '{elsewhere}' AS other;\nDELETE FROM other.kept;\n"
+        with self.assertRaisesRegex(snapshot.SnapshotError, "another database file"):
+            self.database(SCHEMA + ROWS + attaching)
+        self.assertEqual(elsewhere.read_bytes(), before)
+
     def test_a_dump_that_defines_no_table_is_refused(self) -> None:
         """A failed export loads as an empty database, and an empty source and target
         compare equal - the one way a copy of nothing could pass."""
