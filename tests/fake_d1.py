@@ -21,7 +21,7 @@ import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, Self
 from unittest import mock
 
@@ -38,6 +38,9 @@ class FakeD1:
         self._uploads: dict[str, bytes] = {}
         # Every request, as (method, host and path, whether it carried a token).
         self.requests: list[tuple[str, str, bool]] = []
+        # Run against a target's file just before an import is applied, as a
+        # write someone else makes while a copy is under way.
+        self.before_import: Callable[[pathlib.Path], None] | None = None
 
     def create(self, name: str, sql: str = "") -> pathlib.Path:
         """A database named `name`, holding `sql` loaded without enforcement, as
@@ -185,6 +188,8 @@ class FakeD1:
                 },
             }
         assert body["action"] == "ingest", body
+        if self.before_import is not None:
+            self.before_import(database)
         before = database.read_bytes()
         payload = self._uploads.pop(uuid)
         if b"\x00" in payload:

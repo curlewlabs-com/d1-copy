@@ -212,6 +212,92 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(status, 2, output)
         self.assertIn("xcf_y.n holds an integer beyond 2^53", output)
 
+    def test_a_table_created_on_the_target_mid_copy_keeps_its_marks(self) -> None:
+        """The empty-target check is a read made before the import, so a table
+        someone creates in between is not refused. Its AUTOINCREMENT mark must
+        survive the import's own bookkeeping, or its next insert reuses an id;
+        and the copy must not be called exact."""
+
+        def someone_else_writes(database: pathlib.Path) -> None:
+            connection = sqlite3.connect(database)
+            try:
+                connection.executescript(
+                    "CREATE TABLE theirs (id INTEGER PRIMARY KEY AUTOINCREMENT);"
+                    "INSERT INTO theirs (id) VALUES (41);"
+                    "DELETE FROM theirs;"
+                )
+            finally:
+                connection.close()
+
+        self.api.create("source", SOURCE)
+        target = self.api.create("target")
+        self.api.before_import = someone_else_writes
+        status, output = self.run_command(
+            "copy", "--source", "source", "--target", "target"
+        )
+        self.assertEqual(status, 1, output)
+        self.assertIn("theirs: exists only in the target", output)
+        self.assertEqual(sorted(marks_of(target)), [("authors", 5), ("theirs", 41)])
+
+    def test_a_source_mark_naming_no_table_is_refused_before_the_target(
+        self,
+    ) -> None:
+        """SQLite lets an application write a mark for a name no table has.
+        Copied, it could land on a table of that name someone creates on the
+        target meanwhile, with or without a mark of its own, and move the ids
+        that table hands out."""
+        self.api.create(
+            "source",
+            SOURCE + "INSERT INTO sqlite_sequence VALUES ('never-print-this', 100);",
+        )
+        target = self.api.create("target")
+        before = target.read_bytes()
+        status, output = self.run_command(
+            "copy", "--source", "source", "--target", "target"
+        )
+        self.assertEqual(status, 1, output)
+        self.assertIn("sqlite_sequence.name holds 1 name(s) no table has", output)
+        self.assertNotIn("never-print-this", output)
+        self.assertNotIn("/import", " ".join(self.api.paths("POST")))
+        self.assertEqual(target.read_bytes(), before)
+
+    def test_every_mark_on_a_table_the_file_creates_is_carried_exactly(
+        self,
+    ) -> None:
+        """SQLite hands out max(mark, highest id) + 1, uses a mark only for an
+        AUTOINCREMENT table, and reads the first of several for one name. A
+        copy that carries each of these as the source holds it hands out the
+        same ids the source would."""
+        shapes = {
+            "above the highest id": "UPDATE sqlite_sequence SET seq = 900 WHERE name = 'authors';",
+            "below the highest id": "UPDATE sqlite_sequence SET seq = 1 WHERE name = 'authors';",
+            "on a table that is not AUTOINCREMENT": "INSERT INTO sqlite_sequence VALUES ('comments', 70);",
+            "twice for one table": "INSERT INTO sqlite_sequence VALUES ('authors', 3);",
+        }
+        for index, (shape, sql) in enumerate(shapes.items()):
+            with self.subTest(shape=shape):
+                source = self.api.create(f"source-{index}", SOURCE + sql)
+                target = self.api.create(f"target-{index}")
+                status, output = self.run_command(
+                    "copy", "--source", f"source-{index}", "--target", f"target-{index}"
+                )
+                self.assertEqual(status, 0, output)
+                self.assert_exact(source, target)
+                self.assertEqual(marks_of(target), marks_of(source))
+
+    def test_a_mark_naming_a_table_in_another_case_is_refused(self) -> None:
+        """SQLite finds a table's mark by its exact name, so this one belongs to
+        no table, and is refused like any other such mark."""
+        self.api.create(
+            "source", SOURCE + "INSERT INTO sqlite_sequence VALUES ('AUTHORS', 100);"
+        )
+        self.api.create("target")
+        status, output = self.run_command(
+            "copy", "--source", "source", "--target", "target"
+        )
+        self.assertEqual(status, 1, output)
+        self.assertIn("sqlite_sequence.name holds 1 name(s) no table has", output)
+
     def test_verify_cannot_be_fooled_by_a_value_the_exports_round_alike(self) -> None:
         """2^53 + 1 and 2^53 export as the same number. A verify that trusted the
         exports would call these databases equal."""
@@ -318,6 +404,17 @@ class CommandTest(unittest.TestCase):
         self.api.create("target")
         self.run_command("copy", "--source", "clean", "--target", "target")
         self.assertFalse((self.work / "run-killed").exists())
+
+
+def marks_of(database: pathlib.Path) -> list[tuple[str, int]]:
+    """Every sequence mark, in the order SQLite reads them."""
+    connection = sqlite3.connect(database)
+    try:
+        return list(
+            connection.execute("SELECT name, seq FROM sqlite_sequence ORDER BY rowid")
+        )
+    finally:
+        connection.close()
 
 
 class CredentialsTest(unittest.TestCase):

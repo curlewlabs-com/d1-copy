@@ -128,7 +128,10 @@ was written.
   source's writers is up to you; nothing here does it.
 - **The target must be empty.** Create a new database for it. The tool never
   drops or deletes anything, and D1 applies none of a failed import, so a failed
-  run leaves the target as it was.
+  run leaves the target as it was. The check that it is empty is a read made
+  before the import, so do not write to a target while it is being filled. A
+  table someone else creates there meanwhile is left as it is, sequence marks
+  included, and the comparison then fails on it.
 
 ## How it works
 
@@ -174,7 +177,13 @@ What it refuses, each before the target is touched:
   both sides, because 2^53 + 1 and 2^53 export as the same number. `restore`
   asks the loaded dump. The live check reads each row of the database once,
   and the command prints what it read, since D1 meters rows read;
-- foreign keys that form a cycle with no nullable column.
+- foreign keys that form a cycle with no nullable column;
+- an AUTOINCREMENT mark in `sqlite_sequence` whose name is not exactly that of
+  a table being copied. SQLite lets an application write one, and finds a
+  table's mark by its exact name, so such a mark belongs to no table here.
+  Copied, it could land on a table of that name created on the target
+  meanwhile and change the ids that table hands out. The refusal gives a
+  count, never the names.
 
 Other behaviour of the D1 API that the client handles:
 
@@ -235,11 +244,6 @@ other.
 Where one of these ends in a failed import, nothing is applied to the target:
 D1 applies none of a failed import.
 
-- **The empty-target check is a read made before the import.** A table someone
-  else creates on the target while a copy runs is not refused. The comparison
-  then fails, and by then the import's `DELETE FROM sqlite_sequence` has
-  cleared that table's sequence marks. Do not write to a target while it is
-  being filled.
 - **The NUL restoration runs after the dump's triggers exist.** It is done by
   `UPDATE` on the local working copy, so an `UPDATE` trigger in the schema runs
   there too, and can change that copy, on both sides alike. It also covers
