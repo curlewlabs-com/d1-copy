@@ -77,7 +77,7 @@ produce the file these traps are in.
 ## How to use it
 
 ```sh
-python3 -m pip install "d1-copy @ git+https://github.com/curlewlabs-com/d1-copy@v0.2.0"
+python3 -m pip install "d1-copy @ git+https://github.com/curlewlabs-com/d1-copy@v0.2.1"
 
 export CLOUDFLARE_ACCOUNT_ID=...
 export CLOUDFLARE_API_TOKEN=...   # D1 Edit on the account

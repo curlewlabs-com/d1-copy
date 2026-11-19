@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "d1-copy"
-version = "0.2.0"
+version = "0.2.1"
 description = "Copy a Cloudflare D1 database into an empty one, or restore an export into one, and prove the copy exact."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
