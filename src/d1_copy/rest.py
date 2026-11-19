@@ -24,7 +24,9 @@ import pathlib
 import time
 import urllib.error
 import urllib.request
-from typing import Any, cast, override
+from typing import Any, override
+
+from ._decoded import json_array, json_object
 
 API = "https://api.cloudflare.com/client/v4"
 
@@ -350,24 +352,6 @@ def _error_messages(body: bytes) -> str:
         for error in map(json_object, errors)
         if error is not None
     )
-
-
-def json_object(value: object) -> dict[str, Any] | None:
-    """`value` as a decoded JSON object, or None when it is anything else.
-
-    The one place a decoded value's `isinstance(..., dict)` is narrowed, since
-    pyright reads that check as a dict of unknown keys and values. A JSON
-    object's keys are always strings.
-    """
-    return cast(dict[str, Any], value) if isinstance(value, dict) else None
-
-
-def json_array(value: object) -> list[Any] | None:
-    """`value` as a decoded JSON array, or None when it is anything else."""
-    if not isinstance(value, list):
-        return None
-    items: list[Any] = [*value]
-    return items
 
 
 def _answered(result: object) -> bool:

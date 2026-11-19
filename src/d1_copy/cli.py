@@ -61,6 +61,7 @@ import sys
 import time
 
 from . import rest, snapshot
+from ._decoded import json_object
 from .workdir import WorkdirInUse, WorkdirUnsafe, private_workdir
 
 _TABLES_SQL = (
@@ -285,7 +286,7 @@ def _say_timings(timings: dict[str, float]) -> None:
 
 def _import_figures(summary: dict[str, object]) -> str:
     meta = summary.get("meta")
-    figures = rest.json_object(meta) or {}
+    figures = json_object(meta) or {}
     return (
         " ".join(
             f"{key}={figures[key]}"
