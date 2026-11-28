@@ -77,7 +77,7 @@ produce the file these traps are in.
 ## How to use it
 
 ```sh
-python3 -m pip install "d1-copy @ git+https://github.com/curlewlabs-com/d1-copy@v0.2.1"
+python3 -m pip install "d1-copy @ git+https://github.com/curlewlabs-com/d1-copy@v0.3.0"
 
 export CLOUDFLARE_ACCOUNT_ID=...
 export CLOUDFLARE_API_TOKEN=...   # D1 Edit on the account
@@ -87,11 +87,6 @@ d1-copy restore --dump backup.sql --target my-db-restored
 d1-copy verify  --source my-db --target my-db-copy
 d1-copy check   --source my-db
 ```
-
-The `v0.2.1` install above sets `_deploy_lock.locked` to `1` during a copy or
-restore. Its comparison checks for the table and its single row on both sides
-regardless of the row's value. Builds from this source copy and compare those
-rows like any other application data.
 
 `python3 -m d1_copy ...` is the same command. The command is the supported
 interface. The Python modules behind it can be imported, but before 1.0 they
