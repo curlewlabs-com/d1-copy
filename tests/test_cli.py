@@ -365,18 +365,15 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(status, 1, output)
         self.assertIn("- authors.id holds an integer beyond 2^53", output)
 
-    def test_a_managed_databases_copy_arrives_locked_and_compares_exact(self) -> None:
-        """cloudflare-deploy-toolkit's Worker refuses requests while the lock is
-        set, so the copy is closed from the moment it holds data."""
+    def test_copy_preserves_a_legacy_deploy_lock_value(self) -> None:
+        """An older dump's control state is data that must round trip exactly."""
         source = self.api.create("source", SOURCE + LOCK)
         target = self.api.create("target")
         status, output = self.run_command(
             "copy", "--source", "source", "--target", "target"
         )
         self.assertEqual(status, 0, output)
-        self.assertIn("deploy lock reads back as set", output)
-        self.assertEqual(lock_of(target), 1)
-        self.assertEqual(lock_of(source), 0)
+        self.assertEqual(lock_of(target), 0)
         self.assert_exact(source, target)
 
     def test_the_token_goes_to_the_api_and_nowhere_else(self) -> None:

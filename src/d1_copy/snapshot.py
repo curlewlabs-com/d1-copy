@@ -17,9 +17,7 @@ WHAT IS COMPARED, and what deliberately is not:
     so the import file ends with the reload that puts them into use
     (write_import_sql);
   - the schema itself, as the statements `sqlite_schema` stores, though not the
-    order it stores them in: write_import_sql keeps that, and its test holds it;
-  - the rows of LOCK_TABLE are NOT compared, though the table's presence is. See
-    LOCK_TABLE.
+    order it stores them in: write_import_sql keeps that, and its test holds it.
 
 Rows are compared as multisets and never by rowid: a table keyed by a BLOB still
 has an implicit rowid that a dump does not carry, so an import assigns fresh ones.
@@ -59,16 +57,6 @@ from typing import override
 # D1 keeps internal state in tables under this prefix. An export omits them and a
 # caller may not write them, so they are not part of what a copy owes.
 _PLATFORM_PREFIX = "_cf_"
-
-# The single-row deploy lock of a database managed by cloudflare-deploy-toolkit
-# (https://github.com/curlewlabs-com/cloudflare-deploy-toolkit). Its Worker
-# refuses requests while the row reads locked, so a copy that held data and read
-# unlocked would be serving before anyone chose to open it: the import writes the
-# row locked (write_import_sql). Its rows are therefore not compared, since a
-# locked copy of an open source is the intended result. Its presence is: a
-# database that has lost the row answers every request as locked. A database
-# without the table is copied and compared like any other.
-LOCK_TABLE = "_deploy_lock"
 
 # SQLite's own bookkeeping tables that a dump does carry and a copy does owe.
 _SQLITE_TABLES_COMPARED = ("sqlite_sequence", "sqlite_stat1")
@@ -236,15 +224,6 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
     return found is not None
 
 
-def has_lock_table(database: pathlib.Path) -> bool:
-    """Whether a LOADED database carries LOCK_TABLE."""
-    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
-    try:
-        return _has_table(connection, LOCK_TABLE)
-    finally:
-        connection.close()
-
-
 def _rows(connection: sqlite3.Connection, table: str) -> collections.Counter[_Row]:
     quoted = table.replace('"', '""')
     cursor = connection.execute(f'SELECT * FROM "{quoted}"')
@@ -323,9 +302,7 @@ def _compare(
             )
         )
 
-    tables = sorted(
-        {*application_tables(source), *application_tables(target)} - {LOCK_TABLE}
-    )
+    tables = sorted({*application_tables(source), *application_tables(target)})
     for table in [*tables, *_SQLITE_TABLES_COMPARED]:
         in_source, in_target = _has_table(source, table), _has_table(target, table)
         if not in_source and not in_target:
@@ -357,19 +334,6 @@ def _compare(
                 )
             )
 
-    sides = (("source", source), ("target", target))
-    if any(_has_table(connection, LOCK_TABLE) for _, connection in sides):
-        for side, connection in sides:
-            if not _has_table(connection, LOCK_TABLE):
-                differences.append(Difference(LOCK_TABLE, f"missing from the {side}"))
-                continue
-            held = connection.execute(f"SELECT count(*) FROM {LOCK_TABLE}").fetchone()[
-                0
-            ]
-            if held != 1:
-                differences.append(
-                    Difference(LOCK_TABLE, f"{side} holds {held} row(s), expected one")
-                )
     return differences
 
 
@@ -492,11 +456,6 @@ def _quoted(name: str) -> str:
 def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
     """Write `database` out as SQL that D1's import accepts. See the module docstring.
 
-    A LOCK_TABLE row is written as locked whatever the source held. Setting it
-    with a second call after the import leaves a window, and a failure in it
-    leaves a complete copy open; written here, the lock arrives in the same
-    all-or-nothing import as the rows it guards.
-
     The order is the whole point: the deferred-key pragma, every table, every
     row in an order _insert_plan has made safe, the restores that plan owes, the
     sequence marks, then everything else the schema holds, and last the planner
@@ -528,14 +487,12 @@ def write_import_sql(database: pathlib.Path, destination: pathlib.Path) -> None:
             early = _indexes_parent_keys_need(connection, tables)
             for _, definition in early:
                 out.write(f"{definition};\n")
-            locked = {LOCK_TABLE: {"locked": "1"}}
             for table in plan.tables:
                 _write_rows(
                     connection,
                     table,
                     out,
                     held_back=plan.deferred.get(table, ()),
-                    fixed=locked.get(table, {}),
                 )
             for table, columns in plan.deferred.items():
                 _write_restores(connection, table, columns, out)
@@ -969,11 +926,8 @@ def _write_rows(
     out: typing.TextIO,
     *,
     held_back: typing.Collection[str] = (),
-    fixed: typing.Mapping[str, str] | None = None,
 ) -> None:
-    """One INSERT per row. `held_back` columns are written NULL and restored later;
-    `fixed` columns are written as the given SQL whatever the row holds."""
-    fixed = fixed or {}
+    """One INSERT per row. `held_back` columns are written NULL and restored later."""
     columns = [
         str(row[1])
         for row in connection.execute(f"PRAGMA table_info({_quoted(table)})")
@@ -982,11 +936,7 @@ def _write_rows(
     prefix = f"INSERT INTO {_quoted(table)} ({names}) VALUES("
     for row in connection.execute(f"SELECT {names} FROM {_quoted(table)}"):
         rendered = ",".join(
-            fixed[column]
-            if column in fixed
-            else "NULL"
-            if column in held_back
-            else _literal(value, f"{table}.{column}")
+            "NULL" if column in held_back else _literal(value, f"{table}.{column}")
             for column, value in zip(columns, row, strict=True)
         )
         out.write(f"{prefix}{rendered});\n")

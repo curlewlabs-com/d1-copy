@@ -227,16 +227,6 @@ file, or a directory another user owns or others can open - it refuses to run
 until you remove it, since another account on the machine may have put it
 there.
 
-### Databases managed by cloudflare-deploy-toolkit
-
-A database managed by
-[cloudflare-deploy-toolkit](https://github.com/curlewlabs-com/cloudflare-deploy-toolkit)
-carries a `_deploy_lock` table. When the source has it, the copy is written
-locked, and the lock row is left out of the comparison; the table's presence
-and its single row are still checked. Open the copy with the toolkit when you
-are ready for it to serve. A database without that table is copied like any
-other.
-
 ## What it does not do
 
 - It does not copy a database that is still changing into an exact copy. See

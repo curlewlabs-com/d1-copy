@@ -187,28 +187,6 @@ def _checked_target(client: rest.D1Client, target: rest.Database) -> None:
         )
 
 
-# --- the lock row -----------------------------------------------------------
-
-
-def _require_locked(client: rest.D1Client, database: rest.Database) -> None:
-    """Read the target's deploy lock back and refuse to go on unless it is set.
-
-    The import wrote the row as locked, in the same all-or-nothing step as the
-    rows it guards (snapshot.write_import_sql), so there was never a moment when
-    the target held data and was open. This only reads it back.
-    """
-    observed = client.query(
-        database.uuid,
-        f"SELECT locked FROM {snapshot.LOCK_TABLE} WHERE id = 1",
-        mutates=False,
-    ).rows
-    if len(observed) != 1 or int(observed[0]["locked"]) != 1:
-        raise rest.D1Error(
-            f"{database}: deploy lock did not read back as set; observed {observed!r}"
-        )
-    _say(f"{database}: deploy lock reads back as set")
-
-
 # --- the copy ---------------------------------------------------------------
 
 
@@ -263,9 +241,6 @@ def _fill_and_prove(
     summary = client.import_file(target.uuid, import_sql)
     timings["import_target"] = time.monotonic() - started
     _say(f"import summary: {_import_figures(summary)}")
-
-    if snapshot.has_lock_table(source_db):
-        _require_locked(client, target)
 
     target_db, timings["export_target"] = _export_and_load(
         client, target, workdir, "target"
