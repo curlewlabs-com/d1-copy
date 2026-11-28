@@ -45,16 +45,6 @@ DELETE FROM sqlite_sequence;
 INSERT INTO "sqlite_sequence" ("name","seq") VALUES('authors',2);
 """
 
-# The deploy lock of a database cloudflare-deploy-toolkit manages, as its own
-# migration creates it.
-LOCK_SCHEMA = """
-CREATE TABLE _deploy_lock (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  locked INTEGER NOT NULL DEFAULT 0
-) STRICT;
-"""
-LOCK_ROW = """INSERT INTO "_deploy_lock" ("id","locked") VALUES(1,0);\n"""
-
 
 def _load_one_statement_per_transaction(
     sql: pathlib.Path, database: pathlib.Path
@@ -202,56 +192,14 @@ class CompareTest(_Databases):
         found = self.differences(SCHEMA + ROWS, SCHEMA + orphan)
         self.assertTrue(any("foreign-key" in line for line in found))
 
-
-class DeployLockTest(_Databases):
-    """The one table this tool knows by name: cloudflare-deploy-toolkit's lock.
-
-    Its Worker refuses requests while the row reads locked, so a copy that held
-    data and read unlocked would be open before anyone chose to open it.
-    """
-
-    LOCKED = SCHEMA + LOCK_SCHEMA + ROWS + LOCK_ROW
-
-    def test_an_unlocked_source_yields_a_locked_target_in_the_import_itself(
-        self,
-    ) -> None:
-        """Locked by the same all-or-nothing import that writes the rows, so no
-        failure between two steps can leave a full copy open."""
-        source = self.database(self.LOCKED)
-        target = self.copied(source)
-        connection = sqlite3.connect(target)
-        try:
-            (locked,) = connection.execute("SELECT locked FROM _deploy_lock").fetchone()
-        finally:
-            connection.close()
-        self.assertEqual(locked, 1)
-        # Still an exact copy: the lock row is control state, not data.
-        self.assertEqual(snapshot.compare(source, target), [])
-
-    def test_a_held_target_lock_is_not_a_difference(self) -> None:
-        held = self.LOCKED.replace(
-            '("id","locked") VALUES(1,0)', '("id","locked") VALUES(1,1)'
-        )
-        self.assertEqual(self.differences(self.LOCKED, held), [])
-
-    def test_a_target_without_its_lock_row_is_a_difference(self) -> None:
-        """Excluded from equality is not excluded from existence: a target with
-        no lock row answers every request as locked, forever."""
-        unlocked = self.LOCKED.replace(LOCK_ROW, "")
-        found = self.differences(self.LOCKED, unlocked)
+    def test_a_changed_legacy_deploy_lock_is_a_difference(self) -> None:
+        """The old row still has to agree even when its key and count agree."""
+        ddl = "CREATE TABLE _deploy_lock (id INTEGER PRIMARY KEY, locked INTEGER);"
+        source = ddl + "INSERT INTO _deploy_lock VALUES (1, 0);"
+        target = ddl + "INSERT INTO _deploy_lock VALUES (1, 1);"
+        found = self.differences(source, target)
         self.assertEqual(len(found), 1)
         self.assertTrue(found[0].startswith("_deploy_lock:"))
-
-    def test_a_lock_table_on_one_side_only_is_a_difference(self) -> None:
-        found = self.differences(self.LOCKED, SCHEMA + ROWS)
-        self.assertIn("_deploy_lock: missing from the target", found)
-
-    def test_a_database_without_the_table_is_an_ordinary_copy(self) -> None:
-        """Nothing about the lock applies to a database that never had one."""
-        source = self.database(SCHEMA + ROWS)
-        target = self.copied(source)
-        self.assertFalse(snapshot.has_lock_table(target))
-        self.assertEqual(snapshot.compare(source, target), [])
 
 
 # The order a D1 export can really have: `comments` sorts and is cataloged before
