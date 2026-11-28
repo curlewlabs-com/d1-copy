@@ -6,9 +6,8 @@
     d1-copy check   --source NAME
 
 `copy` exports the source, imports it into an EMPTY target, exports the target
-back, and compares that export with the source's locally (snapshot.py, which
-also says why the import file is regenerated rather than replayed). It is a
-whole-database copy on purpose: with no delta to compute there is no
+back, and compares that export with the source's locally (snapshot.py). It is
+a whole-database copy on purpose: with no delta to compute there is no
 UPDATE-or-DELETE ordering, no UNIQUE reuse and no cascade for a partial apply to
 get wrong, and the target is what the source's own dump says and nothing else.
 The price is that the copy's duration grows with the database rather than with
@@ -17,7 +16,7 @@ source's other queries while it runs.
 
 `restore` is `copy` with a dump file standing in for the source: an export kept
 as a backup, already decompressed. It reads no live database. D1 refuses an
-export's own statement order, and this does not replay it.
+export's own statement order (import_file.py).
 
 `verify` exports two databases and compares them, writing nothing.
 
@@ -42,7 +41,7 @@ WHAT IT REFUSES, each before anything is written:
     it and the comparison, made between exports, could not tell (snapshot.py's
     UNEXPORTABLE);
   - foreign keys that form a cycle with no nullable column to break it at
-    (snapshot.py).
+    (import_file.py).
 
 Credentials: CLOUDFLARE_ACCOUNT_ID, and CLOUDFLARE_API_TOKEN with D1 Edit on the
 account (an export is write-classed). Neither is ever printed.
@@ -60,7 +59,7 @@ import pathlib
 import sys
 import time
 
-from . import rest, snapshot
+from . import import_file, rest, snapshot
 from ._decoded import json_object
 from .workdir import WorkdirInUse, WorkdirUnsafe, private_workdir
 
@@ -226,11 +225,10 @@ def _fill_and_prove(
 
     # Rendering is where a value that cannot be carried exactly, or a
     # foreign-key cycle that cannot be written, is refused - before the target
-    # is touched. The export is never imported as it arrived; snapshot.py says
-    # why.
+    # is touched.
     started = time.monotonic()
     import_sql = workdir / "import.sql"
-    snapshot.write_import_sql(source_db, import_sql)
+    import_file.write_import_sql(source_db, import_sql)
     timings["render_import"] = time.monotonic() - started
 
     # The target was read as empty a moment ago (_checked_target). Should
