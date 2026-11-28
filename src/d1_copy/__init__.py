@@ -1,8 +1,9 @@
 """Copy one D1 database into another and prove the copy exact. See the README.
 
-The command is the interface (cli.py). `snapshot` loads, compares and rewrites
-dumps locally, `rest` makes the D1 API calls, and `workdir` keeps the working
-files private and removes them.
+The command is the interface (cli.py). `snapshot` loads and compares dumps
+locally. `import_file.write_import_sql` regenerates SQL for D1 imports.
+`rest` makes the D1 API calls. `workdir` keeps the working files private and
+removes them.
 """
 
 import sys
