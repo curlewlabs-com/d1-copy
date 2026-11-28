@@ -88,6 +88,11 @@ d1-copy verify  --source my-db --target my-db-copy
 d1-copy check   --source my-db
 ```
 
+The `v0.2.1` install above sets `_deploy_lock.locked` to `1` during a copy or
+restore. Its comparison checks for the table and its single row on both sides
+regardless of the row's value. Builds from this source copy and compare those
+rows like any other application data.
+
 `python3 -m d1_copy ...` is the same command. The command is the supported
 interface. The Python modules behind it can be imported, but before 1.0 they
 can change in any release, so pin an exact version if you use them.
