@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from typing import override
 
-from d1_copy import snapshot
+from d1_copy import import_file, snapshot
 from tests.fake_d1 import exported
 
 # The shape a D1 export has: a deferred-foreign-key pragma, the schema, the rows,
@@ -88,7 +88,7 @@ class _Databases(unittest.TestCase):
     def copied(self, source: pathlib.Path) -> pathlib.Path:
         """What a target holds once the regenerated import file has run on it."""
         import_sql = self._path("import", ".sql")
-        snapshot.write_import_sql(source, import_sql)
+        import_file.write_import_sql(source, import_sql)
         target = self._path("target", ".db")
         _load_one_statement_per_transaction(import_sql, target)
         return target
@@ -308,7 +308,7 @@ class ForeignKeyCycleTest(_Databases):
         ).replace("VALUES(2,NULL)", "VALUES(2,X'aa')")
         source = self.database(unbreakable)
         with self.assertRaisesRegex(snapshot.SnapshotError, "cycle"):
-            snapshot.write_import_sql(source, self.root / "import.sql")
+            import_file.write_import_sql(source, self.root / "import.sql")
 
 
 class ForeignKeyPlanTest(_Databases):
@@ -405,7 +405,7 @@ class ForeignKeyPlanTest(_Databases):
                     "node NOT NULL REFERENCES nodes(k));\n"
                 )
                 with self.assertRaisesRegex(snapshot.SnapshotError, "cycle"):
-                    snapshot.write_import_sql(source, self.root / "import.sql")
+                    import_file.write_import_sql(source, self.root / "import.sql")
         self.assert_copies_exactly(
             "CREATE TABLE nodes (k INTEGER PRIMARY KEY, "
             "link INTEGER REFERENCES links(id));\n"
@@ -519,7 +519,7 @@ class UniqueParentIndexTest(_Databases):
         )
         source = self.database(dump)
         import_sql = self.root / "import.sql"
-        snapshot.write_import_sql(source, import_sql)
+        import_file.write_import_sql(source, import_sql)
         lines = import_sql.read_text(encoding="utf-8").splitlines()
         first_row = next(i for i, line in enumerate(lines) if line.startswith("INSERT"))
         first_index = next(
@@ -572,7 +572,7 @@ class EmbeddedNulTest(_Databases):
         shorten the value in the target and report nothing at all while doing so."""
         source = self.database(self.DUMP)
         import_sql = self.root / "import.sql"
-        snapshot.write_import_sql(source, import_sql)
+        import_file.write_import_sql(source, import_sql)
         self.assertNotIn(b"\x00", import_sql.read_bytes())
         self.assertEqual(snapshot.compare(source, self.copied(source)), [])
 
@@ -597,7 +597,7 @@ class RefusedBeforeWritingTest(_Databases):
         real = ROWS.replace("VALUES(1,'a',100)", "VALUES(1,'a',0.1)")
         source = self.database(loose + real)
         with self.assertRaisesRegex(snapshot.SnapshotError, "authors.joined_at"):
-            snapshot.write_import_sql(source, self.root / "import.sql")
+            import_file.write_import_sql(source, self.root / "import.sql")
 
 
 # Lines of an export taken from a remote D1 database, kept byte for byte
@@ -861,7 +861,7 @@ class PlannerStatisticsTest(_Databases):
     ) -> None:
         source = self.database(SCHEMA + ROWS + PLANNED + STATISTICS)
         import_sql = self.root / "import.sql"
-        snapshot.write_import_sql(source, import_sql)
+        import_file.write_import_sql(source, import_sql)
 
         target_path = self.root / "target.db"
         target = sqlite3.connect(target_path, autocommit=True)
